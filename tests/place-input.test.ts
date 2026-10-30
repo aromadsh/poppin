@@ -15,6 +15,23 @@ function setup() {
 }
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
+test("confirmed reservation survives submission and clears when event identity changes", async t => {
+  const { controller: c, id, calls } = setup(); t.after(() => c.deactivate());
+  c.updatePlace(id, "name", "테스트 팝업");
+  const lookup = c.lookupNow(id); calls[0].answer(result()); await lookup;
+  const reservation = { date: dates[0], time: "13:00", confirmed: true as const };
+  c.setReservation(id, reservation);
+  assert.deepEqual((await c.resolvePlaces())[0].reservation, reservation);
+  c.updatePlace(id, "address", "다른 건물");
+  assert.equal(c.getSnapshot()[0].reservation, undefined);
+  c.setReservation(id, reservation);
+  c.setDates(dates[0], dates[0]);
+  assert.equal(c.getSnapshot()[0].reservation, undefined);
+  c.setReservation(id, reservation);
+  c.updatePlace(id, "name", "다른 행사");
+  assert.equal(c.getSnapshot()[0].reservation, undefined);
+});
+
 test("name-only submit starts and awaits unique lookup, returning only analyzer fields", async t => {
   const { controller: c, id, calls, row } = setup(); t.after(() => c.deactivate());
   c.updatePlace(id, "name", "테스트 팝업");

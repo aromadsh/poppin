@@ -1,7 +1,7 @@
 import { forecastQueues, type QueueForecast } from "./forecast";
 
 export type Input = {
-  places: { name: string; genre: string; address: string; stayMinutes: number }[];
+  places: { name: string; genre: string; address: string; stayMinutes: number; reservation?: { date: string; time: string; confirmed: true } }[];
   dateFrom: string;
   dateTo: string;
   timeFrom: string;
@@ -81,7 +81,14 @@ export function validateInput(raw: unknown, now = new Date()): Input {
   const places = raw.places.map((place, index) => {
     if (!record(place)) throw new Error(`${index + 1}번째 팝업 정보를 확인해 주세요.`);
     if (!Number.isInteger(place.stayMinutes) || (place.stayMinutes as number) < 10 || (place.stayMinutes as number) > 240) throw new Error("체류시간은 10~240분 사이의 정수로 입력해 주세요.");
-    return { name: textField(place.name, "팝업 이름", 1, 100), genre: textField(place.genre, "장르", 0, 80), address: textField(place.address, "주소", 1, 240), stayMinutes: place.stayMinutes as number };
+    let reservation: Input["places"][number]["reservation"];
+    if (place.reservation !== undefined) {
+      const r = place.reservation;
+      if (!record(r) || r.confirmed !== true || !validDate(r.date) || !Number.isFinite(minutes(r.time))) throw new Error("예약 날짜·시간과 본인 확인을 완료해 주세요.");
+      if (typeof raw.dateFrom !== "string" || typeof raw.dateTo !== "string" || r.date < raw.dateFrom || r.date > raw.dateTo) throw new Error("예약 날짜가 방문 기간 안에 있어야 합니다.");
+      reservation = { date: r.date, time: r.time as string, confirmed: true };
+    }
+    return { name: textField(place.name, "팝업 이름", 1, 100), genre: textField(place.genre, "장르", 0, 80), address: textField(place.address, "주소", 1, 240), stayMinutes: place.stayMinutes as number, ...(reservation ? { reservation } : {}) };
   });
   if (!validDate(raw.dateFrom) || !validDate(raw.dateTo)) throw new Error("방문 날짜를 YYYY-MM-DD 형식으로 확인해 주세요.");
   if (raw.dateFrom < seoulNow(now).date) throw new Error("과거 날짜에는 일정을 추천할 수 없습니다. 한국 시간 기준 오늘 이후를 선택해 주세요.");
@@ -96,7 +103,7 @@ function sourceUrl(value: unknown): boolean {
   if (typeof value !== "string") return false;
   try { return ["https:", "http:"].includes(new URL(value).protocol); } catch { return false; }
 }
-function evidenceProblem(ev: PlaceEvidence | undefined, input: Input): string | null {
+function evidenceProblem(ev: PlaceEvidence | undefined, input: Input, reserved: boolean): string | null {
   if (!ev || ev.status === "not_found") return "입력한 장소에 해당하는 운영 근거를 찾지 못했습니다.";
   if (ev.matched !== true) return "이름과 주소가 입력한 장소와 일치하는지 확인되지 않았습니다.";
   if (ev.status === "past") return "이미 종료된 행사입니다.";
@@ -105,10 +112,10 @@ function evidenceProblem(ev: PlaceEvidence | undefined, input: Input): string | 
   if (ev.eventEnd < input.dateFrom) return "선택한 기간 전에 종료된 행사입니다.";
   if (ev.eventStart > input.dateTo) return "선택한 기간 이후에 시작하는 행사입니다.";
   if (!Array.isArray(ev.sources) || !ev.sources.some((source) => source.matched === true && sourceUrl(source.url))) return "이 장소와 일치하는 확인 출처가 없습니다.";
-  if (ev.admission?.reservation === "sold_out") return "입장 예약이 매진되어 확정 일정에서 제외했습니다.";
-  if (ev.admission?.reservation === "available") return "예약 가능 안내가 있어도 사용자 예약 완료를 확인할 수 없어 확정 일정에서 제외했습니다.";
-  if (ev.admission?.reservation === "required_unknown") return "입장 예약이 필요하지만 예약 가능 여부가 확인되지 않았습니다.";
-  if (ev.admission?.reservation !== "not_required") return "예약 없이 현장 입장이 가능한지 확인되지 않았습니다.";
+  if (!reserved && ev.admission?.reservation === "sold_out") return "입장 예약이 매진되었습니다. 이미 예약했다면 예약 내역을 본인 확인해 주세요.";
+  if (!reserved && ev.admission?.reservation === "available") return "예약 가능 안내만 확인되었습니다. 이미 예약했다면 예약 내역을 본인 확인해 주세요.";
+  if (!reserved && ev.admission?.reservation === "required_unknown") return "사전 예약이 필요합니다. 예약 내역을 본인 확인해 주세요.";
+  if (!ev.admission || ev.admission.reservation === "unknown") return "예약·입장 조건이 확인되지 않았습니다.";
   if (!Array.isArray(ev.hours) || !ev.hours.some((hour) => validDate(hour.date) && hour.date >= input.dateFrom && hour.date <= input.dateTo && hour.date >= ev.eventStart! && hour.date <= ev.eventEnd! && Number.isFinite(minutes(hour.open)) && minutes(hour.close, true) > minutes(hour.open))) return "선택한 날짜에 명시된 영업시간이 없습니다.";
   return null;
 }
@@ -141,13 +148,16 @@ function schedule(input: Input, evidence: Map<number, PlaceEvidence>, forecasts:
   const stops: Stop[] = [];
   for (const index of route) {
     const place = input.places[index], ev = evidence.get(index)!;
+    const reservation = place.reservation;
+    if (reservation && reservation.date !== date) return null;
     if (date < ev.eventStart! || date > ev.eventEnd!) return null;
     const travel = stops.length ? walkingMinutes(evidence.get(stops[stops.length - 1].index)!, ev) : 0;
     const ready = cursor + travel;
     const hours = ev.hours.filter((h) => h.date === date && Number.isFinite(minutes(h.open)) && minutes(h.close, true) > minutes(h.open)).sort((a, b) => minutes(a.open) - minutes(b.open));
     let stop: Stop | undefined;
     for (const hour of hours) {
-      const arrival = Math.max(ready, minutes(hour.open));
+      const arrival = reservation ? minutes(reservation.time) : Math.max(ready, minutes(hour.open));
+      if (arrival < ready || arrival < minutes(hour.open)) continue;
       const wait = waitAt(ev, date, arrival, forecasts);
       const departure = arrival + wait.max + place.stayMinutes;
       const lastEntry = hour.lastEntry ?? ev.admission?.lastEntry;
@@ -176,7 +186,7 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
   const problems = new Map<number, string>();
   input.places.forEach((_, index) => {
     const ev = allEvidence.find((item) => item.index === index);
-    const problem = evidenceProblem(ev, input);
+    const problem = evidenceProblem(ev, input, Boolean(input.places[index].reservation));
     if (problem) problems.set(index, problem);
     else evidence.set(index, ev!);
   });
@@ -208,7 +218,8 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
     return [{ index, reason: problems.get(index) ?? (missingCoordinates ? "일부 장소의 좌표가 확인되지 않아 여러 장소의 이동 경로를 계산할 수 없습니다. 단독 방문만 표시합니다." : "선택한 날짜·영업시간·입장마감·방문 시간 안에 이동, 대기, 체류를 모두 넣을 수 없습니다.") }];
   });
   const notes = ["한국 시간 기준이며, 방문 가능한 장소 수를 먼저 비교한 뒤 대기 근거가 있는 방문 수, 이동·대기 시간 순서로 정렬합니다.", "도보 이동은 직선거리 × 1.3, 시속 4km로 계산한 예상치입니다. 첫 장소까지 이동시간은 포함하지 않습니다."];
-  if (allEvidence.some((ev) => ev.admission?.reservation !== "not_required")) notes.push("예약 필수·매진·입장 조건 미확인 장소는 확정 일정에서 제외합니다. 예약 가능 안내만으로 사용자 예약 완료를 가정하지 않습니다.");
+  if (allEvidence.some((ev) => ev.admission?.reservation !== "not_required")) notes.push("예약이 필요한 장소는 예약 내역을 본인 확인한 경우에만 입력한 예약 날짜·시간으로 계산합니다. 입장 조건 미확인 장소는 제외합니다.");
+  if (input.places.some(place => place.reservation)) notes.push("예약 날짜·시간은 사용자 본인 확인 정보입니다. 예약처의 실제 조회·인증 결과가 아니며 입장을 보장하지 않습니다.");
   if (days.some((day) => day.stops.some((stop) => !stop.waitKnown))) notes.push("대기 근거 미확인: 해당 날짜·도착 시각 ±60분 안의 관측이 없는 방문은 대기 30분을 임시 확보했습니다. 실제 대기를 보장하지 않습니다.");
   if (days.length && !days[0].complete) notes.push("모든 장소를 방문하는 일정이 성립하지 않아 가능한 일부 장소만 표시합니다. 제외 사유를 확인해 주세요.");
   if (days.some((day) => day.stops.some((stop) => stop.waitKind === "observed"))) notes.push("관측 대기는 같은 날짜의 가장 가까운 시각을 사용하고, 일정에는 관측 범위의 상한을 확보합니다. 이후 현장 상황은 달라질 수 있습니다.");
