@@ -13,6 +13,36 @@ function evidence(index = 0, overrides: Partial<PlaceEvidence> = {}): PlaceEvide
   return { index, matched: true, status: "verified", eventStart: "2026-10-01", eventEnd: "2026-11-30", hours: [{ date: "2026-10-30", open: "10:00", close: "18:00" }], admission: { reservation: "not_required", lastEntry: null, note: "예약 없이 현장 입장" }, lat: 37.54, lng: 127.05, value: "관심 굿즈", summary: "공식 운영 공지", queue: [], sources: [{ title: "공식 공지", url: "https://example.com/official", publishedAt: null, matched: true, note: "운영 확인" }], ...overrides };
 }
 
+test("예약 본인 확인은 예약 날짜와 시각에만 반영하고 운영 근거는 계속 요구한다", () => {
+  const raw = input();
+  Object.assign(raw.places[0], { reservation: { date: "2026-10-30", time: "13:00", confirmed: true } });
+  const ev = evidence(0, { admission: { reservation: "required_unknown", lastEntry: null, note: "사전 예약 필수" } });
+  const result = planVisits(raw, [ev], now);
+  assert.equal(result.days[0]?.stops[0].arrival, "13:00");
+  assert.equal(planVisits(raw, [{ ...ev, matched: false }], now).days.length, 0);
+  Object.assign(raw.places[0], { reservation: { date: "2026-10-31", time: "13:00", confirmed: true } });
+  assert.throws(() => validateInput(raw, now), /예약.*방문 기간/);
+});
+
+test("확인하지 않았거나 잘못된 예약 입력은 거부한다", () => {
+  for (const reservation of [{ date: "2026-10-30", time: "25:00", confirmed: true }, { date: "2026-10-30", time: "13:00", confirmed: false }, { date: "2026-02-30", time: "13:00", confirmed: true }]) {
+    const raw = input(); Object.assign(raw.places[0], { reservation });
+    assert.throws(() => validateInput(raw, now), /예약/);
+  }
+});
+
+test("예약 시각은 방문시간·영업시간·이동시간·행사 근거를 우회하지 않는다", () => {
+  const raw = input();
+  raw.places[0].reservation = { date: "2026-10-30", time: "13:00", confirmed: true };
+  for (const ev of [evidence(0, { hours: [{ date: "2026-10-30", open: "14:00", close: "18:00" }] }), evidence(0, { admission: { reservation: "unknown", lastEntry: null, note: "미확인" } })]) {
+    assert.equal(planVisits(raw, [ev], now).days.length, 0);
+  }
+  assert.equal(planVisits({ ...raw, timeFrom: "14:00" }, [evidence()], now).days.length, 0);
+  const pair = input(2);
+  pair.places.forEach(p => { p.reservation = { date: "2026-10-30", time: "13:00", confirmed: true }; });
+  assert.equal(planVisits(pair, [evidence(), evidence(1)], now).days[0].stops.length, 1);
+});
+
 test("입력 경계와 서울 날짜를 검증하고 텍스트를 정리한다", () => {
   const raw = input(); raw.places[0].name = "  팝업  ";
   assert.equal(validateInput(raw, now).places[0].name, "팝업");
@@ -205,8 +235,26 @@ test("예약 가능 안내도 예약 후보로만 남기고 현장 입장 일정
   assert.equal(result.reservationCandidates.length, 1);
   assert.equal(result.reservationCandidates[0].index, 0);
   assert.deepEqual(result.days[0].stops.map(stop => stop.index), [1]);
-  assert.match(result.excluded[0].reason, /예약 완료/);
+  assert.match(result.excluded[0].reason, /예약.*본인 확인/);
   assert.deepEqual(planVisits(input(), [evidence()], now).reservationCandidates, []);
+});
+
+test("본인 확인한 예약은 지정 일시에만 계산하고 미예약 장소만 예약 후보로 남긴다", () => {
+  const request = input(2); request.dateTo = "2026-10-31";
+  request.places[0].reservation = { date: "2026-10-31", time: "13:00", confirmed: true };
+  const hours = ["2026-10-30", "2026-10-31"].map(date => ({ date, open: "10:00", close: "18:00" }));
+  const unreserved = reservationEvidence({ index: 1, hours });
+  for (const reservation of ["available", "required_unknown", "sold_out"] as const) {
+    const booked = reservationEvidence({ hours, admission: { reservation, lastEntry: null, note: "예약 입장" } });
+    const result = planVisits(request, [booked, unreserved], now);
+    assert.deepEqual(result.days.map(day => day.date), ["2026-10-31"], reservation);
+    assert.deepEqual(result.days[0].stops.map(stop => [stop.index, stop.arrival]), [[0, "13:00"]], reservation);
+    assert.deepEqual(result.reservationCandidates.map(candidate => candidate.index), [1], reservation);
+    assert.deepEqual(result.reservationCandidates[0].windows.map(window => window.date), ["2026-10-30", "2026-10-31"]);
+    const missed = planVisits({ ...request, timeFrom: "14:00" }, [booked, unreserved], now);
+    assert.deepEqual(missed.days, [], reservation);
+    assert.deepEqual(missed.reservationCandidates.map(candidate => candidate.index), [1], reservation);
+  }
 });
 
 test("예약 후보도 행사 일치·기간·출처·영업시간 검증을 통과해야 한다", () => {

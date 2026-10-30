@@ -1,6 +1,7 @@
 "use client";
 
 import type { PlaceRow } from "../lib/place-input";
+import { useState } from "react";
 
 type Props = {
   place: PlaceRow;
@@ -11,10 +12,13 @@ type Props = {
   lookup: (id: string) => Promise<void>;
   select: (id: string, candidateId: string) => void;
   composing?: (id: string, value: boolean) => void;
+  setReservation: (id: string, reservation: PlaceRow["reservation"]) => void;
+  dateFrom: string;
+  dateTo: string;
 };
 function Arrow(){return <svg viewBox="0 0 256 256" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="16" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M64 192 192 64M64 64h128v128"/></svg>}
 
-export function PopupPlaceFields({place:p,index,removable,update,remove,lookup,select,composing}:Props) {
+export function PopupPlaceFields({place:p,index,removable,update,remove,lookup,select,composing,setReservation,dateFrom,dateTo}:Props) {
   const searching=p.lookupStatus==="loading";
   const pending=searching||p.lookupStatus==="scheduled";
   const choices=p.lookupResult?.candidates||[];
@@ -38,7 +42,34 @@ export function PopupPlaceFields({place:p,index,removable,update,remove,lookup,s
     <div className="field-row"><div className="field"><label htmlFor={`genre-${id}`}>장르 <span>{p.autoGenre?"자동입력":"수정 가능"}</span></label><input id={`genre-${id}`} maxLength={80} list="genres" value={p.genre} placeholder={pending?"검색 결과를 기다리고 있어요":"자동으로 채워집니다"} onChange={e=>update(id,"genre",e.target.value)}/></div><div className="field"><label htmlFor={`stay-${id}`}>체류 시간</label><select id={`stay-${id}`} value={p.stayMinutes} onChange={e=>update(id,"stayMinutes",Number(e.target.value))}>{[30,45,60,90,120].map(n=><option key={n} value={n}>{n}분</option>)}</select></div></div>
     <div className="field"><label htmlFor={`address-${id}`}>주소 <span>{p.autoAddress?"자동입력":"수정 가능"}</span></label><input id={`address-${id}`} maxLength={240} value={p.address} placeholder={pending?"주소를 확인하는 중이에요":"자동입력 후 수정할 수 있어요"} onChange={e=>update(id,"address",e.target.value)}/></div>
     {unresolved&&<p className="lookup-manual-hint">정확한 행사명으로 다시 찾거나, 알고 있는 주소와 장르를 직접 입력해 주세요.</p>}
+    <p className="lookup-hint">상세 주소도 입력할 수 있어요. 검색은 행사명과 도로명·지역을 함께 사용하며, 같은 건물의 다른 행사는 구분합니다.</p>
+    <ReservationFields key={`${p.name}:${p.address}:${dateFrom}:${dateTo}`} place={p} dateFrom={dateFrom} dateTo={dateTo} setReservation={setReservation}/>
   </fieldset>;
+}
+
+function ReservationFields({ place: p, dateFrom, dateTo, setReservation }: Pick<Props, "place" | "dateFrom" | "dateTo" | "setReservation">) {
+  const [enabled, setEnabled] = useState(Boolean(p.reservation));
+  const [date, setDate] = useState(p.reservation?.date || "");
+  const [time, setTime] = useState(p.reservation?.time || "");
+  const [error, setError] = useState("");
+  const confirmed = p.reservation?.date === date && p.reservation?.time === time;
+  const id = p.id;
+  function confirm() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date || date < dateFrom || date > dateTo || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      setError("방문 기간 안의 예약 날짜와 올바른 시간을 입력해 주세요."); return;
+    }
+    setError(""); setReservation(id, { date, time, confirmed: true });
+  }
+  return <div className="reservation-fields">
+    <label className="reservation-toggle"><input type="checkbox" checked={enabled} onChange={e => { setEnabled(e.target.checked); setReservation(id, undefined); setError(""); }}/> 이미 사전 예약한 장소예요</label>
+    {enabled && <>
+      <p className="lookup-hint" id={`reservation-hint-${id}`}>예약처의 내 예약 화면에서 행사명과 장소를 확인한 뒤 예약 날짜·시간을 입력하세요. 예약번호·이름·연락처는 입력하지 마세요. 실제 예약 조회·인증 기능은 제공하지 않습니다.</p>
+      <div className="field-row"><div className="field"><label htmlFor={`reservation-date-${id}`}>예약 날짜</label><input id={`reservation-date-${id}`} type="date" required ref={node => { node?.setCustomValidity(confirmed ? "" : "예약 내역 본인 확인 버튼을 눌러 주세요."); }} value={date} min={dateFrom} max={dateTo} aria-describedby={`reservation-hint-${id}`} onChange={e => { setDate(e.target.value); setReservation(id, undefined); setError(""); }}/></div><div className="field"><label htmlFor={`reservation-time-${id}`}>예약 시간</label><input id={`reservation-time-${id}`} type="time" required value={time} onChange={e => { setTime(e.target.value); setReservation(id, undefined); setError(""); }}/></div></div>
+      <button type="button" className="lookup-button" onClick={confirm} disabled={confirmed}>예약 내역 본인 확인·일정에 반영</button>
+      <p role="status" className="lookup-hint">{confirmed ? `본인 확인 입력: ${date} ${time} · 예약처 인증 결과가 아닙니다.` : "확인 버튼을 눌러야 예약 시간이 일정에 반영됩니다."}</p>
+      {error && <p role="alert" className="lookup-manual-hint">{error}</p>}
+    </>}
+  </div>;
 }
 
 

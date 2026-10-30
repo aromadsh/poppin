@@ -3,12 +3,36 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import type { Input } from "../lib/planner";
-const { parseResearchResponse, researchPlaces, ResearchError, MODEL } = await import(new URL("../lib/research.ts", import.meta.url).href) as typeof import("../lib/research");
+const { parseResearchResponse, researchPlaces, ResearchError, MODEL, addressSearchHints } = await import(new URL("../lib/research.ts", import.meta.url).href) as typeof import("../lib/research");
 
 const now = new Date("2026-10-30T00:00:00Z");
 const input: Input = { places: [{ name: "테스트 팝업", address: "서울 성동구 테스트", genre: "캐릭터", stayMinutes: 60 }], dateFrom: "2026-10-30", dateTo: "2026-10-31", timeFrom: "10:00", timeTo: "18:00", preferences: "" };
 const official = "https://example.com/official";
 const unrelated = "https://example.com/related";
+
+test("detailed Korean addresses provide street and locality search fallbacks without losing building numbers", () => {
+  assert.deepEqual(addressSearchHints("서울 광진구 아차산로 272 스타시티몰 3층 브이스퀘어"), ["서울 광진구 아차산로 272", "서울 광진구"]);
+  assert.deepEqual(addressSearchHints("서울 성동구 성수동2가 123-4 A동 201호"), ["서울 성동구 성수동2가 123-4", "서울 성동구 성수동2가"]);
+  assert.deepEqual(addressSearchHints("경기 양평군 양서면"), ["경기 양평군 양서면"]);
+  assert.deepEqual(addressSearchHints("  서울   성동구 연무장길 12-3 (성수동) 2층 "), ["서울 성동구 연무장길 12-3", "서울 성동구"]);
+});
+
+test("research preserves detailed addresses but sends separate broader discovery hints", async () => {
+  const original = globalThis.fetch;
+  const detailed = { ...input, places: [{ ...input.places[0], address: "서울 광진구 아차산로 272 스타시티몰 3층 브이스퀘어", reservation: { date: "2026-10-30", time: "12:00", confirmed: true as const } }] };
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const sent = JSON.parse(body.input);
+    assert.equal(sent.places[0].address, detailed.places[0].address);
+    assert.deepEqual(sent.places[0].searchLocations, ["서울 광진구 아차산로 272", "서울 광진구"]);
+    assert.equal("reservation" in sent.places[0], false);
+    assert.match(body.instructions, /Discovery is not verification/);
+    assert.match(body.instructions, /different building number/);
+    return Response.json(response());
+  };
+  try { await researchPlaces(detailed, "unit-test-placeholder"); }
+  finally { globalThis.fetch = original; }
+});
 function evidence(overrides: Record<string, unknown> = {}) {
   return { index: 0, matched: true, status: "verified", eventStart: "2026-10-01", eventEnd: "2026-11-03", eventSourceUrl: official,
     hours: [{ date: "2026-10-30", open: "10:00", close: "18:00", lastEntry: null as string | null, sourceUrl: official }], admission: { reservation: "not_required", lastEntry: null, note: "예약 없는 현장 입장", sourceUrl: official }, lat: 37.5, lng: 127, locationSourceUrl: official,

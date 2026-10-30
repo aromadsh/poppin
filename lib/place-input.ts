@@ -9,7 +9,7 @@ export type PlaceRow = Input["places"][number] & {
   autoAddress: boolean;
   autoGenre: boolean;
 };
-type Field = keyof Input["places"][number];
+type Field = "name" | "genre" | "address" | "stayMinutes";
 type Request = { controller: AbortController; promise: Promise<LookupResult>; users: Set<string> };
 type RowState = { generation: number; manualAddress: boolean; manualGenre: boolean; composing: boolean; timer?: ReturnType<typeof setTimeout>; pending?: Promise<void>; request?: Request };
 const messages = {
@@ -110,6 +110,7 @@ export class PopupPlacesController {
     if (!row || !state || row[key] === value) return;
     if ((key === "stayMinutes") !== (typeof value === "number")) return;
     this.revision++;
+    if (key === "name" || key === "address") this.patch(id, { reservation: undefined });
     if (key === "address") state.manualAddress = true;
     if (key === "genre") state.manualGenre = true;
     if (key === "name") {
@@ -117,6 +118,11 @@ export class PopupPlacesController {
       this.patch(id, { name: value as string, ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
       this.schedule(id);
     } else this.patch(id, { [key]: value, ...(key === "address" ? { autoAddress: false } : {}), ...(key === "genre" ? { autoGenre: false } : {}) });
+  };
+  setReservation = (id: string, reservation: Input["places"][number]["reservation"]) => {
+    if (!this.rows.has(id)) return;
+    this.revision++;
+    this.patch(id, { reservation });
   };
   setComposing = (id: string, composing: boolean) => {
     const state = this.rows.get(id);
@@ -130,7 +136,7 @@ export class PopupPlacesController {
     this.dateFrom = from; this.dateTo = to; this.revision++;
     for (const row of this.places) {
       this.cancel(row.id);
-      this.patch(row.id, { ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
+      this.patch(row.id, { reservation: undefined, ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
       this.schedule(row.id);
     }
   };
@@ -187,6 +193,8 @@ export class PopupPlacesController {
   private applyCandidate(id: string, candidate: LookupCandidate) {
     const state = this.rows.get(id);
     if (!state || candidate.status !== "active" || !candidate.address?.trim()) return false;
+    const row = this.places.find(row => row.id === id)!;
+    if (!state.manualAddress && row.address !== candidate.address) this.patch(id, { reservation: undefined });
     const genre = state.manualGenre ? this.places.find(row => row.id === id)?.genre : candidate.genre;
     this.patch(id, { ...(!state.manualAddress ? { address: candidate.address, autoAddress: true } : {}), ...(!state.manualGenre ? { genre: candidate.genre || "", autoGenre: Boolean(candidate.genre?.trim()) } : {}), lookupStatus: "resolved", lookupMessage: genre?.trim() ? messages.unique : "주소를 확인했어요. 장르는 직접 입력해 주세요." });
     return true;
@@ -249,7 +257,7 @@ export class PopupPlacesController {
         if (!row.name.trim()) throw new Error(`${index + 1}번째 팝업 이름을 입력해 주세요.`);
         if (!manual && row.lookupStatus !== "resolved") throw new Error(`${row.name}: ${row.lookupMessage || messages.not_found}`);
         if (!row.address.trim() || !row.genre.trim()) throw new Error(`${row.name}: 주소와 장르를 직접 입력해 주세요.`);
-        return { name: row.name.trim(), address: row.address.trim(), genre: row.genre.trim(), stayMinutes: row.stayMinutes };
+        return { name: row.name.trim(), address: row.address.trim(), genre: row.genre.trim(), stayMinutes: row.stayMinutes, ...(row.reservation ? { reservation: row.reservation } : {}) };
       });
     } finally { unsubscribe(); }
   };
