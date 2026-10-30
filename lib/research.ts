@@ -121,7 +121,7 @@ export function parseResearchResponse(raw: unknown, input: Input, now = new Date
     if (dateSupported && eventEnd! < input.dateFrom) status = "past";
     else if (dateSupported && eventStart! <= input.dateTo && eventEnd! >= input.dateFrom && item.status === "verified") status = "verified";
     const admission = matched && item.admission && hasSupport(item.admission.sourceUrl) && (item.admission.lastEntry === null || validTime(item.admission.lastEntry))
-      ? { reservation: item.admission.reservation, lastEntry: item.admission.lastEntry, note: item.admission.note }
+      ? { reservation: item.admission.reservation, lastEntry: item.admission.lastEntry, note: item.admission.note, sourceUrl: urlKey(item.admission.sourceUrl)! }
       : { reservation: "unknown" as const, lastEntry: null, note: "예약·입장 조건 미확인" };
     const hours = matched ? item.hours.filter(h => validDate(h.date) && h.date >= input.dateFrom && h.date <= input.dateTo && eventStart !== null && eventEnd !== null && h.date >= eventStart && h.date <= eventEnd && validTime(h.open) && validTime(h.close) && h.open < h.close && hasSupport(h.sourceUrl) && (h.lastEntry == null || (validTime(h.lastEntry) && h.lastEntry >= h.open && h.lastEntry <= h.close))).map(({ date, open, close, lastEntry }) => ({ date, open, close, lastEntry: lastEntry ?? null })) : [];
     const queue = matched ? item.queue.filter(q => validDate(q.date) && q.date <= today && validTime(q.time) && (q.date !== today || Number(q.time.slice(0, 2)) * 60 + Number(q.time.slice(3)) <= nowMinute) && Number.isFinite(q.min) && Number.isFinite(q.max) && q.min >= 0 && q.max >= q.min && q.max <= 600 && hasSupport(q.sourceUrl)).map(q => ({ ...q, sourceUrl: urlKey(q.sourceUrl)! })) : [];

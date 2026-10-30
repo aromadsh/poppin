@@ -92,6 +92,16 @@ test("reservation claims require their own real matched source", () => {
   const invented = parseResearchResponse(response([evidence({ admission: { reservation: "not_required", lastEntry: "16:00", note: "허구", sourceUrl: "https://invented.example/fake" } })]), input, now).evidence[0];
   assert.equal(invented.admission?.reservation, "unknown");
   assert.equal(invented.admission?.lastEntry, null);
+  assert.equal(invented.admission?.sourceUrl, undefined);
+});
+
+test("reservation candidates retain the validated admission link, not an unrelated search result", () => {
+  const reservation = { reservation: "required_unknown", lastEntry: null, note: "사전예약 11월 4일 오픈", sourceUrl: official + "#booking" };
+  const result = parseResearchResponse(response([evidence({ admission: reservation })]), input, now).evidence[0];
+  assert.equal(result.admission?.sourceUrl, official);
+  const unsupported = parseResearchResponse(response([evidence({ admission: { ...reservation, sourceUrl: unrelated } })]), input, now).evidence[0];
+  assert.equal(unsupported.admission?.reservation, "unknown");
+  assert.equal(unsupported.admission?.sourceUrl, undefined);
 });
 
 test("sold-out policy and explicit date-specific entry cutoff survive as structured constraints", () => {
