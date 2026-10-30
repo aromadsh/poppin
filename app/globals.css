@@ -13,3 +13,5 @@
 .lookup-candidate-sources a,.lookup-proof a,.lookup-unconfirmed a{display:inline-flex;align-items:center;gap:4px}.place-fieldset .remove-place{display:flex;align-items:center;justify-content:center}
 
 .reservation-fields{margin-top:16px;padding:16px;background:#f7f3fc;border-radius:12px;display:grid;gap:12px;min-width:0}.reservation-toggle{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}.reservation-toggle input{width:16px;height:16px;accent-color:var(--purple)}.reservation-fields .field-row{margin:0}.reservation-fields .lookup-button{white-space:normal;justify-self:start}
+
+.queue-chart .chart-column{min-width:144px}

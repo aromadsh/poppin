@@ -78,9 +78,33 @@ export default function Home() {
  <section className="proof-section wrap reveal"><div className="proof-copy"><span className="eyebrow accent">GROUNDED IN REAL SOURCES</span><h2>추천에는,<br />이유가 있어야 하니까.</h2><p>그럴듯한 숫자보다 확인할 수 있는 출처.<br />PopPin은 정보의 빈자리까지 보여줍니다.</p></div><div className="proof-details">{[["link", "직접 열어볼 수 있는 원문", "검색 출처와 게시일, 조회 시각을 함께 확인하세요."], ["clock", "추정과 관측을 구분한 대기 정보", "언제 쓰인 후기인지, 실제 보고인지 추정인지 표시해요."], ["check", "확인된 행사만 방문 일정으로", "지난 행사와 날짜가 불분명한 자료는 추천에서 걸러요."]].map(([icon, h, p]) => <div key={h}><Icon name={icon}/><h3>{h}</h3><p>{p}</p></div>)}</div></section>
  <section id="faq" className="faq-section wrap reveal"><div><span className="eyebrow accent">GOOD QUESTIONS</span><h2>미리 알아두면<br />더 좋은 것들.</h2></div><div className="faq-list">{faqs.map(([q, a]) => <details key={q}><summary><span>{q}</span><span className="faq-plus"><Icon name="plus" size={20}/></span></summary><p>{a}</p></details>)}</div></section><section className="final-cta wrap reveal"><span className="eyebrow">YOUR NEXT POPUP IS WAITING</span><h2>다음 설렘은 어디인가요?</h2><p>좋아하는 곳으로 가는 하루를 함께 계획해요.</p><a href="#planner" className="button light">내 방문 타이밍 찾기 <Icon name="arrow" size={20}/></a><span>회원가입 없이 바로 시작하세요.</span></section></main><footer className="site-footer wrap"><div><Brand /><p>좋아하는 순간을 위한, 좋은 타이밍.</p></div><div className="footer-links"><a href="/privacy">개인정보 처리 안내</a><a href="/terms">이용약관</a><span>© {new Date().getFullYear()} PopPin</span></div></footer></>;
 }
+function formatWait(minutes: number) {
+    if (minutes < 60) return `${minutes}분`;
+    const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+    return `${minutes}분(${hours}시간${remainder ? ` ${remainder}분` : ""})`;
+}
+function formatWaitRange(min: number, max: number) {
+    return min === max ? formatWait(min) : `${formatWait(min)} ~ ${formatWait(max)}`;
+}
 function QueueChart({ evidence }: {
     evidence: PlaceEvidence;
-}) { const points = evidence.queue.slice(0, 12), max = Math.max(60, ...points.map(p => p.max)); return points.length ? <div className="queue-chart"><div className="chart-legend"><span><i />후기에 나타난 대기 범위</span><small>단위: 분</small></div><div className="chart-bars" role="img" aria-label={points.map(p => `${p.date} ${p.time} ${p.min}에서 ${p.max}분`).join(", ")}>{points.map((p, i) => <div className="chart-column" key={i}><b>{p.min}~{p.max}</b><div className="bar-track"><span style={{ height: `${Math.max(4, p.max / max * 100)}%` }}/></div><strong>{p.time}</strong><small>{p.date.slice(5)}</small><em>{p.kind === "observed" ? "보고된 대기" : "추정"}</em></div>)}</div><p className="input-note">날짜별 자료입니다. 자료 사이 구간을 보간한 미래 예측은 제공하지 않습니다.</p><p className="queue-onset">첫 대기 보고: {points.filter(p => p.kind === "observed" && p.max > 0).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map(p => `${p.date} ${p.time}`)[0] || "미확인"}. 실제 대기 시작과 다를 수 있습니다.</p>{points.map((p, i) => <a className="queue-source" href={p.sourceUrl} target="_blank" rel="noopener noreferrer" key={i}>{p.date} {p.time} 근거 <Icon name="link" size={14}/></a>)}</div> : <div className="no-queue"><Icon name="clock" size={32}/><h4>시간대별 대기 근거가 부족해요.</h4><p>혼잡도 그래프와 웨이팅 시작 시점을 만들 수 없습니다. 일정에는 대기 여유를 별도로 확보합니다.</p></div>; }
+}) {
+    const points = evidence.queue.slice(0, 12), max = Math.max(60, ...points.map(p => p.max));
+    return points.length ? <div className="queue-chart">
+        <div className="chart-legend"><span><i />과거 후기 속 대기 기록</span><small>단위: 분</small></div>
+        <p className="input-note">아래는 과거 후기에 기록된 대기시간입니다. 현재 대기시간이나 방문 예정일의 예상 대기시간이 아닙니다.</p>
+        <div className="chart-bars" role="img" aria-label={points.map(p => `${p.date} ${p.time} 과거 ${p.kind === "observed" ? "후기 기록" : "자료의 추정값"}: ${formatWaitRange(p.min, p.max)}`).join(", ")}>
+            {points.map((p, i) => <div className="chart-column" key={i}>
+                <b>{formatWaitRange(p.min, p.max)}</b>
+                <div className="bar-track"><span style={{ height: `${Math.max(4, p.max / max * 100)}%` }}/></div>
+                <strong>{p.time}</strong><small>{p.date}</small>
+                <em>{p.kind === "observed" ? "과거 후기 기록" : "과거 자료의 추정값"}</em>
+            </div>)}
+        </div>
+        <p className="queue-onset">확보된 기록 중 첫 대기 보고: {points.filter(p => p.kind === "observed" && p.max > 0).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map(p => `${p.date} ${p.time}`)[0] || "미확인"}. 실제 대기 시작과 다를 수 있습니다.</p>
+        {points.map((p, i) => <a className="queue-source" href={p.sourceUrl} target="_blank" rel="noopener noreferrer" key={i}>{p.date} {p.time} 과거 기록 출처 <Icon name="link" size={14}/></a>)}
+    </div> : <div className="no-queue"><Icon name="clock" size={32}/><h4>시간대별 대기 근거가 부족해요.</h4><p>혼잡도 그래프와 웨이팅 시작 시점을 만들 수 없습니다. 일정에는 대기 여유를 별도로 확보합니다.</p></div>;
+}
 function ForecastChart({ evidence, forecasts, preferredDate }: {
     evidence: PlaceEvidence;
     forecasts: QueueForecast[];
