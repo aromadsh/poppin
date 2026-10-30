@@ -135,9 +135,12 @@ test("route reuses cached research while recomputing today's plan and exposes fo
   const plannerUrl = moduleUrl((await readFile(new URL("../lib/planner.ts", import.meta.url), "utf8")).replace('"./forecast"', JSON.stringify(forecastUrl)));
   const researched = { ...parseResearchResponse(response(), input, now), retrievedAt: now.toISOString(), model: MODEL };
   const researchUrl = moduleUrl(`export let calls=0; export class ResearchError extends Error{constructor(code,message,status=502){super(message);this.code=code;this.status=status;}}; export async function researchPlaces(){ calls++; return ${JSON.stringify(researched)}; }`);
+  const guardUrl = moduleUrl((await readFile(new URL("../lib/api-guard.ts", import.meta.url), "utf8"))
+    .replace('"./research"', JSON.stringify(researchUrl))
+    .replace('typeof process !== "undefined" ? process.env.OPENAI_API_KEY : undefined', '"unit-test-placeholder"'));
   const routeSource = (await readFile(new URL("../app/api/analyze/route.ts", import.meta.url), "utf8"))
     .replace('"@/lib/planner"', JSON.stringify(plannerUrl)).replace('"@/lib/research"', JSON.stringify(researchUrl)).replace('"@/lib/forecast"', JSON.stringify(forecastUrl))
-    .replace('typeof process !== "undefined" ? process.env.OPENAI_API_KEY : undefined', '"unit-test-placeholder"');
+    .replace('"@/lib/api-guard"', JSON.stringify(guardUrl));
   const route = await import(moduleUrl(routeSource)) as { POST(request: Request): Promise<Response>; GET(): Response };
   const upstream = await import(researchUrl) as { calls: number };
   const url = "https://poppin.example/api/analyze";

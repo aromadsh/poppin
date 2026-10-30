@@ -46,7 +46,7 @@ const responseSchema = object({ evidence: array(object({
 type JsonRecord = Record<string, unknown>;
 const record = (value: unknown): JsonRecord => typeof value === "object" && value !== null && !Array.isArray(value) ? value as JsonRecord : {};
 const items = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
-function urlKey(value: unknown): string | null {
+export function urlKey(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 2048) return null;
   try {
     const url = new URL(value);
@@ -55,7 +55,7 @@ function urlKey(value: unknown): string | null {
     return url.href;
   } catch { return null; }
 }
-const validDate = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v + "T00:00:00Z")) && new Date(v + "T00:00:00Z").toISOString().slice(0, 10) === v;
+export const validDate = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v + "T00:00:00Z")) && new Date(v + "T00:00:00Z").toISOString().slice(0, 10) === v;
 const validTime = (v: string) => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v);
 
 function unknownEvidence(index: number): PlaceEvidence {
@@ -63,7 +63,7 @@ function unknownEvidence(index: number): PlaceEvidence {
 }
 
 /** Trust URLs only from the actual hosted search output, never from model JSON alone. */
-export function parseResearchResponse(raw: unknown, input: Input, now = new Date()) {
+export function searchResponse(raw: unknown) {
   const response = record(raw);
   if (response.status !== "completed") throw new ResearchError("search_failed", "검색이 완료되지 않았습니다. 잠시 후 다시 시도해 주세요.");
   const output = items(response.output).map(record);
@@ -86,6 +86,11 @@ export function parseResearchResponse(raw: unknown, input: Input, now = new Date
     }
   }
   if (!text || text.length > 120_000) throw new ResearchError("invalid_response", "분석 결과 형식을 확인할 수 없습니다. 다시 시도해 주세요.");
+  return { allowed, text, searchCount: searches.filter(item => record(item.action).type === "search").length };
+}
+
+export function parseResearchResponse(raw: unknown, input: Input, now = new Date()) {
+  const { allowed, text, searchCount } = searchResponse(raw);
   let decoded: unknown;
   try { decoded = JSON.parse(text); } catch { throw new ResearchError("invalid_response", "분석 결과를 읽을 수 없습니다. 다시 시도해 주세요."); }
   const parsed = z.object({ evidence: z.array(evidence).max(5) }).safeParse(decoded);
@@ -125,7 +130,7 @@ export function parseResearchResponse(raw: unknown, input: Input, now = new Date
   // Retain every URL returned by search. Unassigned results are explicitly unverified references.
   const used = new Set(result.flatMap(item => item.sources.map(s => s.url)));
   if (result[0]) for (const [url, source] of allowed) if (!used.has(url)) result[0].sources.push({ ...source, publishedAt: null, matched: false, note: "검색 참고 자료 · 입력한 장소와의 일치 미확인" });
-  return { evidence: result, searchCount: searches.filter(item => record(item.action).type === "search").length };
+  return { evidence: result, searchCount };
 }
 
 export async function researchPlaces(input: Input, apiKey: string) {
