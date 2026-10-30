@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Sitemap: https://poppin-pp.royalbee2048.chatgpt.site/sitemap.xml
