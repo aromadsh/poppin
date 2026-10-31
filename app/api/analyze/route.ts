@@ -9,9 +9,9 @@ const TTL = 10 * 60_000;
 type Research = Awaited<ReturnType<typeof researchPlaces>>;
 const cache = new Map<string, { expires: number; value: Research }>();
 const inflight = new Map<string, Promise<Research>>();
-function analyze(input: Input, result: Research, cached: boolean) {
+async function analyze(input: Input, result: Research, cached: boolean) {
   const now = new Date();
-  return json({ ...result, analysisId: rememberAnalysis(input, result), plan: planVisits(input, result.evidence, now, result.tasteSignals), forecasts: forecastQueues(input, result.evidence, now), cached });
+  return json({ ...result, analysisId: await rememberAnalysis(input, result), plan: planVisits(input, result.evidence, now, result.tasteSignals), forecasts: forecastQueues(input, result.evidence, now), cached });
 }
 
 export async function POST(request: Request) {
@@ -28,17 +28,17 @@ export async function POST(request: Request) {
     const now = Date.now();
     for (const [hash, item] of cache) if (item.expires <= now) cache.delete(hash);
     const saved = cache.get(key);
-    if (saved && !refresh) return analyze(input, saved.value, true);
+    if (saved && !refresh) return await analyze(input, saved.value, true);
     const pending = inflight.get(key);
-    if (pending) return analyze(input, await pending, true);
+    if (pending) return await analyze(input, await pending, true);
     const secret = await apiKey();
     if (!secret) throw new ResearchError("not_configured", "분석 서비스 키가 아직 연결되지 않았습니다.", 503);
     const ip = await digest(request.headers.get("cf-connecting-ip") ?? "local-preview");
     // A different request can have started while the key/IP promises resolved.
     const savedAfterAwait = cache.get(key);
-    if (!refresh && savedAfterAwait && savedAfterAwait.expires > Date.now()) return analyze(input, savedAfterAwait.value, true);
+    if (!refresh && savedAfterAwait && savedAfterAwait.expires > Date.now()) return await analyze(input, savedAfterAwait.value, true);
     const pendingAfterAwait = inflight.get(key);
-    if (pendingAfterAwait) return analyze(input, await pendingAfterAwait, true);
+    if (pendingAfterAwait) return await analyze(input, await pendingAfterAwait, true);
     const release = acquireBudget(ip, "analyze");
     const task = researchPlaces(input, secret).then(result => {
       if (cache.size >= 50) cache.delete(cache.keys().next().value!);
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       return result;
     });
     inflight.set(key, task);
-    try { return analyze(input, await task, false); } finally { inflight.delete(key); release(); }
+    try { return await analyze(input, await task, false); } finally { inflight.delete(key); release(); }
   } catch (error) {
     if (error instanceof ResearchError) return researchErrorResponse(error);
     return json({ error: "분석 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "internal_error" }, 500);

@@ -7,6 +7,7 @@ import { discoverNearby, parseNearbyDiscovery } from "../lib/nearby-discovery";
 import { rememberAnalysis, readAnalysis, type ResearchSnapshot } from "../lib/analysis-store";
 import type { Input, PlaceEvidence } from "../lib/planner";
 import { sameInput } from "../lib/input-snapshot";
+import { combineNearbySelection } from "../lib/nearby-selection";
 const now = new Date("2099-10-31T00:00:00Z"), date = "2099-10-31", url = "https://example.com/event";
 const input = (count = 1): Input => ({ places: Array.from({ length: count }, (_, i) => ({ name: `선택 장소 ${i}`, address: `서울 성동구 길 ${i}`, genre: "체험", stayMinutes: 45 })), dateFrom: date, dateTo: date, timeFrom: "11:00", timeTo: "19:00", preferences: "" });
 const ev = (index = 0, extra: Partial<PlaceEvidence> = {}): PlaceEvidence => ({ index, matched: true, status: "verified", eventStart: date, eventEnd: "2099-11-05",
@@ -16,6 +17,54 @@ const ev = (index = 0, extra: Partial<PlaceEvidence> = {}): PlaceEvidence => ({ 
   classification: { version: 1, category: "beauty", subcategory: "skincare", experienceTags: ["product_trial"], sourceUrls: [url] }, ...extra });
 const snapshot = (count = 1): ResearchSnapshot => ({ evidence: Array.from({ length: count }, (_, i) => ev(i)), tasteSignals: [], searchCount: 1, retrievedAt: now.toISOString(), model: "gpt-6.1-sol" });
 const candidate = (extra: Partial<PlaceEvidence> = {}) => ({ place: { name: "새 팝업", address: "서울 성동구 새길 7", genre: "뷰티", stayMinutes: 45 }, evidence: ev(0, { lat: 37.541, identity: { ...ev().identity!, name: "새 팝업", address: "서울 성동구 새길 7" }, ...extra }), retrievedAt: now.toISOString() });
+
+function proposals(base = input(), replaceIndex: number | null = null) {
+  const retained = base.places.filter((_, i) => i !== replaceIndex);
+  return [0, 1, 2].map(i => {
+    const place = { ...candidate().place, name: `주변 팝업 ${i}`, address: `서울 성동구 새길 ${i + 1}` };
+    return { input: { ...base, places: [...retained, place] }, research: { ...snapshot(),
+      nearbyProposal: { analysisId: "base", anchorIndex: 0, replaceIndex, date: null },
+      evidence: [...retained.map((_, index) => ev(index)), ev(retained.length, { identity: { ...ev().identity!, name: place.name, address: place.address } })] } };
+  });
+}
+
+test("여러 주변 후보를 합쳐 예약과 원래 장소를 유지하고 총 세 곳의 경로를 계산한다", async () => {
+  const base = input(); base.places[0].reservation = { date, time: "14:00", confirmed: true };
+  const { input: combined, research } = combineNearbySelection("base", { input: base, research: snapshot() }, proposals(base).slice(0, 2), now);
+  assert.equal(combined.places.length, 3);
+  assert.deepEqual(combined.places[0], base.places[0]);
+  assert.deepEqual(combined.places.slice(1).map(p => p.name), ["주변 팝업 0", "주변 팝업 1"]);
+  assert.deepEqual(research.evidence.map(e => e.index), [0, 1, 2]);
+  const { planVisits } = await import("../lib/planner");
+  const plan = planVisits(combined, research.evidence, now);
+  assert.equal(plan.days[0].stops.length, 3);
+  assert.equal(plan.days[0].stops.find(s => s.index === 0)?.arrival, "14:00");
+  assert.equal(base.places.length, 1);
+});
+
+test("여러 후보 반영 시 상한·중복·다른 검색·조건 변경을 거부한다", () => {
+  const base = { input: input(), research: snapshot() };
+  const candidates = proposals();
+  assert.throws(() => combineNearbySelection("base", base, [], now), /선택/);
+  assert.throws(() => combineNearbySelection("base", base, candidates, now), /3곳/);
+  assert.throws(() => combineNearbySelection("base", base, [candidates[0], candidates[0]], now), /중복/);
+  assert.throws(() => combineNearbySelection("other", base, [candidates[0]], now), /다시/);
+  const changed = structuredClone(candidates[0]); changed.input.preferences = "changed";
+  assert.throws(() => combineNearbySelection("base", base, [changed], now), /다시/);
+  const missing = structuredClone(candidates[0]); missing.research.evidence = [];
+  assert.throws(() => combineNearbySelection("base", base, [missing], now), /다시/);
+});
+
+test("세 곳에서 후보를 교체할 때 기준 장소와 예약은 유지하고 초과 선택은 거부한다", () => {
+  const base = input(3); base.places[1].reservation = { date, time: "14:00", confirmed: true };
+  const saved = { input: base, research: snapshot(3) };
+  const choices = proposals(base, 2);
+  const combined = combineNearbySelection("base", saved, choices.slice(0, 1), now);
+  assert.deepEqual(combined.input.places.slice(0, 2), base.places.slice(0, 2));
+  assert.deepEqual(combined.research.evidence.map(e => e.index), [0, 1, 2]);
+  assert.throws(() => combineNearbySelection("base", saved, choices.slice(0, 2), now), /3곳/);
+  assert.throws(() => combineNearbySelection("base", saved, proposals(base, 1).slice(0, 1), now), /교체/);
+});
 
 test("form snapshot comparison ignores property order but invalidates changed constraints", () => {
   const original = input(), reordered = { ...original, places: original.places.map(p => ({ address: p.address, genre: p.genre, name: p.name, stayMinutes: p.stayMinutes })) };
@@ -47,6 +96,19 @@ test("nearby discovery only accepts actually searched address and explicit overl
     assert.equal(parseNearbyDiscovery(raw({ ...lead, ...patch }), query).candidates.length, 0);
 });
 
+test("one malformed discovery candidate cannot discard other sourced candidates or a long genre description", () => {
+  const lead = { name: "새 팝업", address: "서울 성동구 새길 7", genre: "뷰티".repeat(60), eventStart: date, eventEnd: "2099-11-05", yearExplicit: true,
+    addressSourceUrl: url, periodSourceUrl: url, genreSourceUrl: url, classification: ev().classification };
+  const raw = { status: "completed", output: [
+    { type: "web_search_call", status: "completed", action: { type: "search", sources: [{ title: "공식", url }] } },
+    { type: "message", content: [{ type: "output_text", text: JSON.stringify({ candidates: [lead, { ...lead, name: null }] }) }] },
+  ] };
+  const parsed = parseNearbyDiscovery(raw, { area: "성동구", lat: null, lng: null, dateFrom: date, dateTo: date });
+  assert.deepEqual(parsed.candidates.map(c => c.name), ["새 팝업"]);
+  assert.equal(parsed.candidates[0].genre.length, 80);
+  assert.equal(parsed.incomplete, true);
+});
+
 test("adding a popup preserves all anchors and an exact reservation, with computed marginal times", () => {
   const request = input(); request.places[0].reservation = { date, time: "14:00", confirmed: true };
   const result = rankNearby(request, snapshot(), 0, null, date, [candidate()], now)[0];
@@ -68,7 +130,7 @@ test("three-place replacement is explicit and never removes a reserved place or 
 });
 
 test("faraway, old, mismatched, unsourced-coordinate and duplicate candidates never appear", () => {
-  for (const patch of [{ lat: 35 }, { matched: false }, { sources: [] }, { lat: null }, { eventEnd: "2098-10-31" }, { identity: { ...ev().identity!, locationStatus: "ambiguous" as const } }])
+  for (const patch of [{ lat: 35 }, { matched: false }, { sources: [] }, { eventEnd: "2098-10-31" }, { identity: { ...ev().identity!, locationStatus: "ambiguous" as const } }])
     assert.deepEqual(rankNearby(input(), snapshot(), 0, null, date, [candidate(patch)], now), []);
   assert.equal(rankNearby(input(), snapshot(), 0, null, date, [candidate(), candidate()], now).length, 1);
   const existing = candidate(); existing.place = input().places[0];
@@ -136,6 +198,10 @@ test("discovery sends separate broad and category searches with the full address
     assert.deepEqual(sent.searchQueries, ["서울 성동구 성수동 뷰티 팝업 2099-10-31", "서울 성동구 성수동 스킨케어 팝업 2099-10-31", "서울 성동구 성수동 2099년 10월 팝업스토어 일정"]);
     assert.equal(sent.address, "서울 성동구 연무장길 88");
     assert.equal(sent.preferences, "스킨케어 좋아요");
+    await discoverNearby({ area: "성수", lat: null, lng: null, dateFrom: date, dateTo: "2099-11-02", topics: ["뷰티"] }, "test");
+    assert.deepEqual(JSON.parse(payload!.input as string).searchQueries, [
+      "성수 뷰티 팝업 2099-10-31 ~ 2099-11-02", "성수 2099년 10월 팝업스토어 일정", "성수 2099년 11월 팝업스토어 일정",
+    ]);
   } finally { globalThis.fetch = original; }
 });
 
@@ -150,8 +216,8 @@ test("catalog and verification cache reuse avoids paid calls, expires, and rejec
   assert.equal(searches, 1); assert.equal(checks, 1);
   await service(input(), snapshot(), 0, null, date, "test", new Date(now.getTime() + 21 * 60_000));
   assert.equal(searches, 2); assert.equal(checks, 2);
-  const invalid = snapshot(); invalid.evidence[0].matched = false;
-  await assert.rejects(service(input(), invalid, 0, null, date, "test", now), /위치/);
+  const invalid = snapshot(); invalid.evidence = [];
+  await assert.rejects(service(input(), invalid, 0, null, date, "test", now), /분석/);
   assert.equal(searches, 2);
 });
 
@@ -167,19 +233,43 @@ test("confirmed anchor addresses without coordinates can discover events without
   const report = await service(input(), research, 0, null, date, "test", now);
   assert.equal(discoveries, 1);
   assert.equal(report.anchorCoordinatesMissing, true);
-  assert.deepEqual(report.recommendations, []);
-  assert.equal(report.unlocated[0].name, "새 팝업");
+  assert.equal(report.recommendations[0].place.name, "새 팝업");
+  assert.equal(report.recommendations[0].distanceMeters, null);
+  assert.equal(report.recommendations[0].status, "needs_verification");
 });
 
-test("unverified or ambiguous anchors still reject discovery even with coordinates", async () => {
+test("unconfirmed anchors use the saved input address and full visit period as discovery hints", async () => {
+  const request = { ...input(), dateTo: "2099-11-02" };
+  const research = snapshot(); research.evidence[0] = ev(0, { matched: false, status: "not_found",
+    identity: { ...ev().identity!, address: "부산 다른 지점", locationStatus: "mismatch" } });
   let discoveries = 0;
-  const service = createNearbyService({ discover: async () => { discoveries++; return { candidates: [], searchCount: 0 }; }, research: async () => snapshot() });
-  for (const patch of [{ matched: false }, { status: "unconfirmed" as const }, { sources: [] },
-    { identity: { ...ev().identity!, locationStatus: "ambiguous" as const } }]) {
-    const research = snapshot(); research.evidence[0] = ev(0, patch);
-    await assert.rejects(service(input(), research, 0, null, date, "test", now), /위치/);
-  }
-  assert.equal(discoveries, 0);
+  const service = createNearbyService({ discover: async query => {
+    discoveries++;
+    assert.equal(query.address, "서울 성동구 길 0");
+    assert.equal(query.dateFrom, "2099-10-31"); assert.equal(query.dateTo, "2099-11-02");
+    assert.equal(query.lat, null); assert.equal(query.lng, null);
+    return { candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 };
+  }, research: async checked => {
+    assert.equal(checked.dateFrom, "2099-10-31"); assert.equal(checked.dateTo, "2099-11-02");
+    return { ...snapshot(), evidence: [candidate().evidence] };
+  } });
+  const report = await service(request, research, 0, null, null, "test", now);
+  assert.equal(discoveries, 1);
+  assert.equal(report.recommendations[0].place.name, "새 팝업");
+  assert.equal(report.recommendations[0].distanceMeters, null);
+  assert.notEqual(report.recommendations[0].status, "ready");
+});
+
+test("range discovery chooses a complete visit day after the first day while preserving the original range", () => {
+  const next = "2099-11-01";
+  const request = { ...input(), dateTo: next }, research = snapshot();
+  research.evidence[0].hours.push({ date: next, open: "11:00", close: "19:00" });
+  const result = rankNearby(request, research, 0, null, null, [candidate({ eventStart: next, hours: [{ date: next, open: "11:00", close: "19:00" }] })], now)[0];
+  assert.equal(result.status, "ready");
+  assert.equal(result.suggestedDate, next);
+  assert.equal(result.plan?.date, next);
+  assert.equal(result.proposedInput.dateFrom, date);
+  assert.equal(result.proposedInput.dateTo, next);
 });
 
 test("nearby discovery receives the selected day, full location and taste context, with separate caches", async () => {
@@ -243,15 +333,17 @@ test("verified events without coordinates remain visible without claiming a dist
   const service = createNearbyService({ discover: async () => ({ candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 }),
     research: async () => ({ ...snapshot(), evidence: [candidate({ lat: null, lng: null }).evidence] }) });
   const report = await service(input(), snapshot(), 0, null, date, "test", now);
-  assert.equal(report.recommendations.length, 0);
-  assert.deepEqual(report.unlocated, [{ name: "새 팝업", address: "서울 성동구 새길 7", genre: "뷰티", eventStart: date, eventEnd: "2099-11-05", sourceUrl: url }]);
+  assert.equal(report.recommendations[0].place.name, "새 팝업");
+  assert.equal(report.recommendations[0].distanceMeters, null);
+  assert.equal(report.recommendations[0].status, "needs_verification");
+  assert.equal(report.recommendations[0].plan, null);
 });
 
 test("the selected event cannot reappear as an unlocated candidate under an alias", async () => {
   const service = createNearbyService({ discover: async () => ({ candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 }),
     research: async () => ({ ...snapshot(), evidence: [candidate({ lat: null, lng: null, identity: ev().identity }).evidence] }) });
   const report = await service(input(), snapshot(), 0, null, date, "test", now);
-  assert.deepEqual(report.unlocated, []);
+  assert.deepEqual(report.recommendations, []);
 });
 
 test("a later verification failure preserves earlier results and marks the search incomplete", async () => {
@@ -270,19 +362,44 @@ test("a later verification failure preserves earlier results and marks the searc
   assert.equal(report.checkedCount, 3);
 });
 
-test("analysis snapshots are opaque, copied, bounded by expiry and do not accept client evidence", () => {
-  const original = input(), id = rememberAnalysis(original, snapshot(), now.getTime());
+test("analysis snapshots are opaque, copied, bounded by expiry and do not accept client evidence", async () => {
+  const original = input(), id = await rememberAnalysis(original, snapshot(), now.getTime());
   original.places[0].name = "수정";
-  assert.notEqual(readAnalysis(id, now.getTime())?.input.places[0].name, "수정");
-  assert.equal(readAnalysis(id, now.getTime() + 20 * 60_000), null);
-  assert.equal(readAnalysis("invented"), null);
+  assert.notEqual((await readAnalysis(id, now.getTime()))?.input.places[0].name, "수정");
+  assert.equal(await readAnalysis(id, now.getTime() + 20 * 60_000), null);
+  assert.equal(await readAnalysis("invented"), null);
+});
+
+test("separate server instances retain shared snapshots until the exact twenty-minute expiry", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(await readFile(new URL("../drizzle/0000_lowly_jack_power.sql", import.meta.url), "utf8"));
+  const db = { prepare(sql: string) {
+    return { bind(...values: (string | number)[]) {
+      return { run: () => sqlite.prepare(sql).run(...values), first: async () => sqlite.prepare(sql).get(...values) ?? null };
+    } };
+  }, async batch(statements: { run(): unknown }[]) { return statements.map(statement => statement.run()); } } as unknown as D1Database;
+  try {
+    const { createAnalysisStore } = await import("../lib/analysis-store");
+    const firstServer = createAnalysisStore(async () => db), secondServer = createAnalysisStore(async () => db);
+    const id = await firstServer.rememberAnalysis(input(), snapshot(), now.getTime());
+    assert.equal((await secondServer.readAnalysis(id, now.getTime() + 90_000))?.input.places[0].name, "선택 장소 0");
+    for (let i = 0; i < 51; i++) await secondServer.rememberAnalysis(input(), snapshot(), now.getTime());
+    assert.ok(await firstServer.readAnalysis(id, now.getTime() + 19 * 60_000));
+    assert.equal(await secondServer.readAnalysis(id, now.getTime() + 20 * 60_000), null);
+    assert.equal(await secondServer.readAnalysis("invented", now.getTime()), null);
+    await firstServer.rememberAnalysis(input(), snapshot(), now.getTime() + 20 * 60_000);
+    assert.equal((sqlite.prepare("SELECT COUNT(*) AS count FROM analysis_snapshots").get() as { count: number }).count, 1);
+    const broken = createAnalysisStore(async () => { throw new Error("database unavailable"); });
+    await assert.rejects(broken.readAnalysis(id), /database unavailable/);
+  } finally { sqlite.close(); }
 });
 
 const moduleUrl = (source: string) => "data:text/javascript;base64," + Buffer.from(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64");
 test("nearby endpoint accepts server snapshots only and returns opaque selection IDs", async () => {
-  const id = rememberAnalysis(input(), snapshot());
+  const id = await rememberAnalysis(input(), snapshot());
   const recommendation = rankNearby(input(), snapshot(), 0, null, date, [candidate()], now)[0];
-  const fake = moduleUrl(`export let calls=0; export async function nearbyService(){calls++;return ${JSON.stringify({ recommendations: [recommendation], retrievedAt: now.toISOString(), cached: false, searchCount: 2, discoveredCount: 1, checkedCount: 1, date, replaceIndex: null })};}`);
+  const fake = moduleUrl(`export let calls=0; export let selectedDate; export async function nearbyService(...args){calls++;selectedDate=args[4];return ${JSON.stringify({ recommendations: [recommendation], retrievedAt: now.toISOString(), cached: false, searchCount: 2, discoveredCount: 1, checkedCount: 1, date, replaceIndex: null })};}`);
   const researchUrl = new URL("../lib/research.ts", import.meta.url).href;
   const guardSource = (await readFile(new URL("../lib/api-guard.ts", import.meta.url), "utf8")).replace('"./research"', JSON.stringify(researchUrl))
     .replace('typeof process !== "undefined" ? process.env.OPENAI_API_KEY : undefined', '"test-placeholder"');
@@ -292,23 +409,25 @@ test("nearby endpoint accepts server snapshots only and returns opaque selection
   // data: modules cannot resolve bare package imports.
   source = source.replace('"zod"', JSON.stringify(new URL("../node_modules/zod/index.js", import.meta.url).href));
   const route = await import(moduleUrl(source));
-  const request = (analysisId: string, origin = "http://localhost") => new Request("http://localhost/api/nearby", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ analysisId, anchorIndex: 0, replaceIndex: null, date }) });
+  const request = (analysisId: string, origin = "http://localhost", selectedDate: string | null = date) => new Request("http://localhost/api/nearby", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ analysisId, anchorIndex: 0, replaceIndex: null, date: selectedDate }) });
   assert.equal((await route.POST(request(id, "https://untrusted.example"))).status, 403);
   assert.equal((await route.POST(request("bad-id"))).status, 400);
   assert.equal((await route.POST(request(crypto.randomUUID()))).status, 409);
   const response = await route.POST(request(id)); assert.equal(response.status, 200);
   const data = await response.json() as { recommendations: { proposalId: string; evidence?: unknown; proposedInput?: unknown }[] };
-  assert.ok(readAnalysis(data.recommendations[0].proposalId));
+  assert.ok(await readAnalysis(data.recommendations[0].proposalId));
   assert.equal(data.recommendations[0].evidence, undefined);
   assert.equal(data.recommendations[0].proposedInput, undefined);
   assert.equal((await import(fake)).calls, 1);
+  assert.equal((await route.POST(request(id, "http://localhost", null))).status, 200);
+  assert.equal((await import(fake)).selectedDate, null);
 });
 
 test("applying a stored proposal recalculates without fetch and keeps reservations", async () => {
   const requestInput = input(); requestInput.places[0].reservation = { date, time: "14:00", confirmed: true };
-  const id = rememberAnalysis(requestInput, snapshot());
+  const id = await rememberAnalysis(requestInput, snapshot());
   let source = await readFile(new URL("../app/api/nearby/apply/route.ts", import.meta.url), "utf8");
-  for (const name of ["analysis-store", "planner", "forecast", "research", "api-guard"]) source = source.replace(`"@/lib/${name}"`, JSON.stringify(new URL(`../lib/${name}.ts`, import.meta.url).href));
+  for (const name of ["analysis-store", "nearby-selection", "planner", "forecast", "research", "api-guard"]) source = source.replace(`"@/lib/${name}"`, JSON.stringify(new URL(`../lib/${name}.ts`, import.meta.url).href));
   const route = await import(moduleUrl(source));
   const request = (proposalId: string) => new Request("http://localhost/api/nearby/apply", { method: "POST", headers: { Origin: "http://localhost", "Content-Type": "application/json" }, body: JSON.stringify({ proposalId }) });
   const originalFetch = globalThis.fetch;
@@ -319,5 +438,39 @@ test("applying a stored proposal recalculates without fetch and keeps reservatio
     assert.deepEqual(result.input.places[0].reservation, requestInput.places[0].reservation);
     assert.equal(result.analysis.cached, true);
     assert.equal((await route.POST(request("not-found"))).status, 409);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("선택한 여러 후보를 API에서 함께 계산하고 합친 분석을 저장하며 잘못된 선택을 거부한다", async () => {
+  const base = input(); base.places[0].reservation = { date, time: "14:00", confirmed: true };
+  const analysisId = await rememberAnalysis(base, snapshot());
+  const choices = proposals(base);
+  const ids = await Promise.all(choices.map(choice => rememberAnalysis(choice.input, { ...choice.research,
+    nearbyProposal: { ...choice.research.nearbyProposal, analysisId } })));
+  const otherId = await rememberAnalysis(choices[0].input, choices[0].research);
+  let source = await readFile(new URL("../app/api/nearby/apply/route.ts", import.meta.url), "utf8");
+  for (const name of ["analysis-store", "nearby-selection", "planner", "forecast", "research", "api-guard"]) source = source.replace(`"@/lib/${name}"`, JSON.stringify(new URL(`../lib/${name}.ts`, import.meta.url).href));
+  const route = await import(moduleUrl(source));
+  const request = (proposalIds: unknown, baseId = analysisId, origin = "http://localhost") => new Request("http://localhost/api/nearby/apply", {
+    method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ analysisId: baseId, proposalIds }),
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("Unexpected paid call"); };
+  try {
+    const response = await route.POST(request(ids.slice(0, 2)));
+    assert.equal(response.status, 200);
+    const result = await response.json() as { input: Input; analysis: { analysisId: string; plan: { days: { stops: { index: number }[] }[] }; cached: boolean }; date: string };
+    assert.equal(result.input.places.length, 3);
+    assert.deepEqual(result.input.places[0].reservation, base.places[0].reservation);
+    assert.equal(result.analysis.plan.days[0].stops.length, 3);
+    assert.equal(result.date, date);
+    const saved = await readAnalysis(result.analysis.analysisId);
+    assert.deepEqual(saved?.input, result.input);
+    assert.deepEqual(saved?.research.evidence.map(e => e.index), [0, 1, 2]);
+    assert.equal(result.analysis.cached, true);
+    for (const invalid of [[], ids, [ids[0], ids[0]], [otherId], [123], null]) assert.equal((await route.POST(request(invalid))).status, 400);
+    assert.equal((await route.POST(request([crypto.randomUUID()]))).status, 409);
+    assert.equal((await route.POST(request([ids[0]], crypto.randomUUID()))).status, 409);
+    assert.equal((await route.POST(request([ids[0]], analysisId, "https://untrusted.example"))).status, 403);
   } finally { globalThis.fetch = originalFetch; }
 });

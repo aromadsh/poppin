@@ -9,12 +9,12 @@ import type { ResearchSnapshot } from "./analysis-store";
 export type NearbyStatus = "ready" | "reservation_required" | "needs_confirmation" | "needs_verification" | "unavailable" | "time_conflict";
 export type NearbyRecommendation = {
   id: string; place: Input["places"][number]; evidence: PlaceEvidence;
-  distanceMeters: number; tasteScore: number; reasons: string[]; status: NearbyStatus;
+  distanceMeters: number | null; suggestedDate: string; tasteScore: number; reasons: string[]; status: NearbyStatus;
   additionalTravelMinutes: number | null; additionalTotalMinutes: number | null;
   proposedInput: Input; plan: DayPlan | null; retrievedAt: string;
 };
 export type NearbyUnlocated = { name: string; address: string; genre: string; eventStart: string; eventEnd: string; sourceUrl: string };
-export type NearbyReport = { recommendations: NearbyRecommendation[]; unlocated: NearbyUnlocated[]; anchorCoordinatesMissing?: boolean; verificationIncomplete?: boolean; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string; replaceIndex: number | null };
+export type NearbyReport = { recommendations: NearbyRecommendation[]; unlocated: NearbyUnlocated[]; anchorCoordinatesMissing?: boolean; verificationIncomplete?: boolean; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string | null; replaceIndex: number | null };
 const keyText = (s: string) => s.normalize("NFKC").toLowerCase().replace(/팝업스토어|팝업|[^\p{L}\p{N}]/gu, "");
 export function sameEvent(a: Input["places"][number], b: Input["places"][number]) {
   return keyText(a.name) === keyText(b.name) && keyText(a.address) === keyText(b.address);
@@ -46,52 +46,55 @@ function affinity(ev: PlaceEvidence, anchors: PlaceEvidence[], preferences: stri
   ] };
 }
 
-export function validateNearbySelection(input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string, now: Date) {
+export function validateNearbySelection(input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string | null, now: Date) {
   try { validateInput(input, now); }
   catch (error) { throw new ResearchError("invalid_input", error instanceof Error ? error.message : "방문 조건을 확인해 주세요.", 400); }
   if (!Number.isInteger(anchorIndex) || !input.places[anchorIndex]) throw new ResearchError("invalid_input", "기준 장소를 선택해 주세요.", 400);
-  if (date < input.dateFrom || date > input.dateTo || !validDate(date)) throw new ResearchError("invalid_input", "방문 기간 안의 날짜를 선택해 주세요.", 400);
+  if (date !== null && (date < input.dateFrom || date > input.dateTo || !validDate(date))) throw new ResearchError("invalid_input", "방문 기간 안의 날짜를 선택해 주세요.", 400);
   if (input.places.length === 3 && (replaceIndex === null || !Number.isInteger(replaceIndex) || !input.places[replaceIndex] || replaceIndex === anchorIndex || input.places[replaceIndex].reservation))
     throw new ResearchError("invalid_input", "기준 장소와 예약한 장소를 제외하고 교체할 장소를 선택해 주세요.", 400);
   if (input.places.length < 3 && replaceIndex !== null) throw new ResearchError("invalid_input", "현재 일정에는 장소를 추가할 수 있습니다.", 400);
   const anchor = research.evidence.find(ev => ev.index === anchorIndex);
-  if (!anchor || !anchor.matched || anchor.status !== "verified" || !anchor.sources.some(s => s.matched)
-    || anchor.identity?.locationStatus !== "confirmed" || !anchor.identity.address?.trim())
-    throw new ResearchError("anchor_unverified", "기준 장소의 행사와 위치를 먼저 확인해야 주변을 추천할 수 있어요.", 400);
+  if (!anchor) throw new ResearchError("anchor_unverified", "기준 장소의 분석 정보가 없어요. 방문 조건을 다시 분석해 주세요.", 400);
   return anchor;
 }
 
-export function rankNearby(input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string,
+export function rankNearby(input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string | null,
   candidates: { place: Input["places"][number]; evidence: PlaceEvidence; retrievedAt: string }[], now: Date): NearbyRecommendation[] {
   const anchor = validateNearbySelection(input, research, anchorIndex, replaceIndex, date, now);
-  if (!sourcedCoordinates(anchor)) return [];
+  const dateFrom = date ?? input.dateFrom, dateTo = date ?? input.dateTo;
   const signals = research.tasteSignals ?? [];
   const retained = input.places.map((_, i) => i).filter(i => i !== replaceIndex);
   const baseInput = { ...input, places: retained.map(i => input.places[i]) };
   const retainedEvidence = retained.flatMap((index, i) => {
     const ev = research.evidence.find(ev => ev.index === index); return ev ? [{ ...ev, index: i }] : [];
   });
-  const baseline = planVisits(input, research.evidence, now, signals).days.find(d => d.date === date && d.complete);
+  const baselineDays = planVisits(input, research.evidence, now, signals).days;
   const seen = new Set<string>();
   const ranked = candidates.flatMap(({ place, evidence: ev, retrievedAt }, i): NearbyRecommendation[] => {
-    if (input.places.some(p => sameEvent(p, place) || keyText(p.name) === keyText(place.name)) || research.evidence.some(original => original.identity?.name && ev.identity?.name && keyText(original.identity.name) === keyText(ev.identity.name)) || !sourcedCoordinates(ev)
-      || ev.identity && ev.identity.locationStatus !== "confirmed" || !ev.eventStart || !ev.eventEnd || date < ev.eventStart || date > ev.eventEnd) return [];
-    const distance = distanceMeters(anchor, ev);
-    if (distance > 2000) return [];
+    if (input.places.some(p => sameEvent(p, place) || keyText(p.name) === keyText(place.name)) || research.evidence.some(original => original.matched && original.identity?.name && ev.identity?.name && keyText(original.identity.name) === keyText(ev.identity.name))
+      || !ev.matched || ev.status !== "verified" || !ev.sources.some(s => s.matched)
+      || ev.identity?.locationStatus !== "confirmed" || !ev.eventStart || !ev.eventEnd || ev.eventEnd < dateFrom || ev.eventStart > dateTo) return [];
+    const distance = sourcedCoordinates(anchor) && sourcedCoordinates(ev) ? distanceMeters(anchor, ev) : null;
+    if (distance !== null && distance > 2000) return [];
     const identity = `${keyText(ev.identity?.name || place.name)}:${keyText(ev.identity?.address || place.address)}`;
     if (seen.has(identity)) return [];
     seen.add(identity);
     const proposedInput = { ...input, places: [...baseInput.places, { ...place, stayMinutes: 45 }] };
     const candidateEvidence = { ...ev, index: proposedInput.places.length - 1 };
     const plan = planVisits(proposedInput, [...retainedEvidence, candidateEvidence], now, signals);
-    const strict = plan.days.find(d => d.date === date && d.complete);
-    const conditional = plan.conditionalDays.find(d => d.date === date && d.complete);
-    const booking = plan.reservationCandidates.some(c => c.index === candidateEvidence.index && c.windows.some(w => w.date === date));
+    const inRange = (day: { date: string }) => day.date >= dateFrom && day.date <= dateTo;
+    const strict = plan.days.find(d => inRange(d) && d.complete);
+    const conditional = plan.conditionalDays.find(d => inRange(d) && d.complete);
+    const booking = plan.reservationCandidates.find(c => c.index === candidateEvidence.index)?.windows.find(inRange);
+    const suggestedDate = strict?.date ?? conditional?.date ?? booking?.date
+      ?? ev.hours.find(inRange)?.date ?? (ev.eventStart > dateFrom ? ev.eventStart : dateFrom);
+    const baseline = baselineDays.find(d => d.date === suggestedDate && d.complete);
     const status: NearbyStatus = strict ? "ready" : conditional ? "needs_confirmation" : booking ? "reservation_required"
-      : !ev.hours.some(h => h.date === date) ? "needs_verification"
+      : distance === null || !ev.hours.some(inRange) ? "needs_verification"
       : walkInStatus(ev) !== "available" && (ev.admission?.reservation === "sold_out" || walkInStatus(ev) === "unavailable") ? "unavailable" : "time_conflict";
     const taste = affinity(ev, retainedEvidence, input.preferences, signals);
-    return [{ id: `nearby-${i}`, place: proposedInput.places.at(-1)!, evidence: candidateEvidence, distanceMeters: distance,
+    return [{ id: `nearby-${i}`, place: proposedInput.places.at(-1)!, evidence: candidateEvidence, distanceMeters: distance, suggestedDate,
       tasteScore: taste.score, reasons: taste.reasons, status,
       additionalTravelMinutes: strict && baseline ? strict.totalTravelMinutes - baseline.totalTravelMinutes : null,
       additionalTotalMinutes: strict && baseline ? strict.totalMinutes - baseline.totalMinutes : null,
@@ -99,7 +102,7 @@ export function rankNearby(input: Input, research: ResearchSnapshot, anchorIndex
   });
   const priority = { ready: 0, needs_confirmation: 1, reservation_required: 2, needs_verification: 3, time_conflict: 4, unavailable: 5 };
   ranked.sort((a, b) => priority[a.status] - priority[b.status]
-    || (b.tasteScore * 2 - (b.additionalTravelMinutes ?? 0) * 2 - b.distanceMeters / 100) - (a.tasteScore * 2 - (a.additionalTravelMinutes ?? 0) * 2 - a.distanceMeters / 100));
+    || (b.tasteScore * 2 - (b.additionalTravelMinutes ?? 0) * 2 - (b.distanceMeters ?? 2000) / 100) - (a.tasteScore * 2 - (a.additionalTravelMinutes ?? 0) * 2 - (a.distanceMeters ?? 2000) / 100));
   // Avoid filling the entire shortlist with a single topic when alternatives exist.
   return (Object.keys(priority) as NearbyStatus[]).flatMap(status => {
     const picked: NearbyRecommendation[] = [], deferred: NearbyRecommendation[] = [], disliked: NearbyRecommendation[] = [];
@@ -120,9 +123,11 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
   const pendingDiscovery = new Map<string, Promise<Awaited<ReturnType<typeof discoverNearby>>>>();
   const pendingResearch = new Map<string, Promise<ResearchSnapshot>>();
   const TTL = 20 * 60_000;
-  return async (input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string, secret: string, now = new Date()): Promise<NearbyReport> => {
+  return async (input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string | null, secret: string, now = new Date()): Promise<NearbyReport> => {
     const anchor = validateNearbySelection(input, research, anchorIndex, replaceIndex, date, now);
-    const address = anchor.identity?.address || input.places[anchorIndex].address;
+    const address = anchor.matched && anchor.identity?.locationStatus === "confirmed" && anchor.identity.address
+      ? anchor.identity.address : input.places[anchorIndex].address;
+    const dateFrom = date ?? input.dateFrom, dateTo = date ?? input.dateTo;
     const area = buildSearchPlan({ ...input, places: [{ ...input.places[anchorIndex], address }] })[0].regionHints.join(" ") || address;
     const signals = research.tasteSignals ?? [];
     const anchorTopic = classification(anchor);
@@ -132,9 +137,9 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
       tasteLabel({ axis: "subcategory", id: anchorTopic.subcategory }),
       ...anchorTopic.experienceTags.map(id => tasteLabel({ axis: "experience", id })),
     ])].filter(label => label !== "미분류");
-    const query: DiscoveryQuery = { area, address, anchorName: anchor.identity?.name || input.places[anchorIndex].name,
+    const query: DiscoveryQuery = { area, address, anchorName: input.places[anchorIndex].name,
       lat: sourcedCoordinates(anchor) ? anchor.lat : null, lng: sourcedCoordinates(anchor) ? anchor.lng : null,
-      dateFrom: date, dateTo: date, topics, preferences: input.preferences,
+      dateFrom, dateTo, topics, preferences: input.preferences,
       excludedNames: input.places.map(p => p.name) };
     const key = JSON.stringify(query);
     for (const cache of [catalogs, verified]) for (const [id, item] of cache) if (item.expires <= now.getTime()) cache.delete(id);
@@ -155,14 +160,14 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
       sources: lead.classification.sourceUrls.map(url => ({ title: "발견 근거", url, matched: true, publishedAt: null, note: "후보 분류" })) }, research.evidence, input.preferences, signals).score;
     // Discovery classification is only a preliminary shortlist signal; verified evidence is used in final ranking.
     leads.sort((a, b) => score(b) - score(a));
-    let checkedCount = 0, retrievedAt = catalog.retrievedAt, verificationIncomplete = false;
+    let checkedCount = 0, retrievedAt = catalog.retrievedAt, verificationIncomplete = catalog.value.incomplete ?? false;
     const candidates: Parameters<typeof rankNearby>[5] = [];
     let recommendations: NearbyRecommendation[] = [];
     // Check later leads when early ones fail location/date verification. Each research request accepts at most three places.
     for (let offset = 0; offset < Math.min(leads.length, 8)
       && recommendations.filter(item => ["ready", "needs_confirmation", "reservation_required"].includes(item.status)).length < 3; offset += 3) {
       const selected = leads.slice(offset, Math.min(offset + 3, 8));
-      const verificationInput: Input = { ...input, dateFrom: date, dateTo: date, preferences: "", places: selected.map(c => ({ name: c.name, address: c.address, genre: c.genre || "미분류", stayMinutes: 45 })) };
+      const verificationInput: Input = { ...input, dateFrom, dateTo, preferences: "", places: selected.map(c => ({ name: c.name, address: c.address, genre: c.genre || "미분류", stayMinutes: 45 })) };
       const verificationKey = JSON.stringify(verificationInput);
       let checked = verified.get(verificationKey)?.value;
       if (!checked) {
@@ -187,16 +192,7 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
       }));
       recommendations = rankNearby(input, research, anchorIndex, replaceIndex, date, candidates, now);
     }
-    const unlocated = candidates.flatMap(({ place, evidence: ev }): NearbyUnlocated[] => {
-      const sourceUrl = ev.sources.find(s => s.matched && ev.identity?.sourceUrls.includes(s.url))?.url;
-      if (!ev.matched || ev.status !== "verified" || ev.identity?.locationStatus !== "confirmed" || !sourceUrl
-        || sourcedCoordinates(anchor) && sourcedCoordinates(ev) || !ev.eventStart || !ev.eventEnd || date < ev.eventStart || date > ev.eventEnd
-        || input.places.some(p => sameEvent(p, place) || keyText(p.name) === keyText(place.name))
-        || research.evidence.some(original => original.identity?.name && keyText(original.identity.name) === keyText(ev.identity?.name || ""))) return [];
-      return [{ name: ev.identity.name || place.name, address: ev.identity.address || place.address, genre: place.genre,
-        eventStart: ev.eventStart, eventEnd: ev.eventEnd, sourceUrl }];
-    }).filter((item, index, all) => all.findIndex(other => keyText(other.name) === keyText(item.name) && keyText(other.address) === keyText(item.address)) === index).slice(0, 3);
-    return { recommendations, unlocated, anchorCoordinatesMissing: !sourcedCoordinates(anchor), verificationIncomplete, retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount, date, replaceIndex };
+    return { recommendations, unlocated: [], anchorCoordinatesMissing: !sourcedCoordinates(anchor), verificationIncomplete, retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount, date, replaceIndex };
   };
 }
 export const nearbyService = createNearbyService();

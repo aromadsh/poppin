@@ -50,6 +50,82 @@ function response(entries = [evidence()], urls = [official, unrelated], tasteSig
   ] };
 }
 
+test("확정 주소의 누락된 좌표를 별도 검색해 여러 장소 일정에 반영한다", async () => {
+  const { planVisits } = await import("../lib/planner");
+  const address = "서울 성동구 연무장길 65 LECT성수 2층";
+  const request = { ...input, places: [{ ...input.places[0], address }, { ...input.places[0], name: "두번째 팝업", address: "서울 성동구 연무장길 60" }] };
+  const original = globalThis.fetch;
+  const mapUrl = "https://example.com/address-map";
+  let calls = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (++calls === 1) return Response.json(response([
+      evidence({ lat: null, lng: null, locationSourceUrl: null, identity: { ...evidence().identity, address } }), evidence({ index: 1 }),
+    ]));
+    assert.equal(body.model, MODEL);
+    assert.deepEqual(JSON.parse(body.input).places, [{ index: 0, address, searchAddress: "서울 성동구 연무장길 65" }]);
+    const raw = response([], [mapUrl]);
+    raw.output[1].content![0].text = JSON.stringify({ locations: [{ index: 0, address: "서울 성동구 연무장길 65", lat: 37.5001, lng: 127.0001, sourceUrl: mapUrl }] });
+    return Response.json(raw);
+  };
+  try {
+    const result = await researchPlaces(request, "test");
+    assert.equal(calls, 2);
+    assert.equal(result.evidence[0].lat, 37.5001);
+    assert.equal(result.evidence[0].sources.find(s => s.url === mapUrl)?.matched, true);
+    assert.equal(result.searchCount, 2);
+    assert.equal(planVisits(request, result.evidence, now).days[0].stops.length, 2);
+  } finally { globalThis.fetch = original; }
+});
+
+test("주소 좌표 보충은 다른 건물·가짜 출처·모호한 결과를 거부하고 검색 실패 시 기존 분석을 보존한다", async t => {
+  const address = "서울 성동구 연무장길 65 LECT성수";
+  const request = { ...input, places: [{ ...input.places[0], address }] };
+  const mapUrl = "https://example.com/address-map";
+  const location = { index: 0, address: "서울특별시 성동구 연무장길 65", lat: 37.5001, lng: 127.0001, sourceUrl: mapUrl };
+  const scenarios = [
+    { name: "주소 표기 정규화", locations: [location], accepted: true },
+    { name: "다른 건물", locations: [{ ...location, address: "서울 성동구 연무장길 650" }] },
+    { name: "다른 도로", locations: [{ ...location, address: "서울 성동구 왕십리로 65" }] },
+    { name: "검색되지 않은 출처", locations: [{ ...location, sourceUrl: "https://invented.example/map" }] },
+    { name: "좌표 범위 오류", locations: [{ ...location, lat: 999 }] },
+    { name: "모호한 좌표", locations: [location, { ...location, lat: 37.6 }] },
+    { name: "검색 실패", locations: [], failed: true },
+    { name: "연결 실패", locations: [], offline: true },
+  ];
+  for (const scenario of scenarios) await t.test(scenario.name, async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      if (++calls === 1) return Response.json(response([evidence({ lat: null, lng: null, identity: { ...evidence().identity, address } })]));
+      if (scenario.offline) throw new Error("offline");
+      if (scenario.failed) return Response.json({}, { status: 503 });
+      const raw = response([], [mapUrl]);
+      raw.output[1].content![0].text = JSON.stringify({ locations: scenario.locations });
+      return Response.json(raw);
+    };
+    try {
+      const result = await researchPlaces(request, "test");
+      assert.equal(calls, 2);
+      assert.equal(result.evidence[0].lat, scenario.accepted ? location.lat : null);
+      assert.equal(result.evidence[0].status, "verified");
+      assert.equal(result.evidence[0].hours.length, 1);
+    } finally { globalThis.fetch = original; }
+  });
+});
+
+test("주소가 미확정이거나 기존 좌표가 있으면 별도 좌표 검색을 하지 않는다", async t => {
+  for (const extra of [{}, { lat: null, lng: null, matched: false }, { lat: null, lng: null, identity: { ...evidence().identity, locationStatus: "ambiguous" } }, { lat: null, lng: null }]) await t.test(JSON.stringify(extra), async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json(response([evidence(extra)])); };
+    try {
+      await researchPlaces(input, "test");
+      assert.equal(calls, 1);
+    } finally { globalThis.fetch = original; }
+  });
+});
+
 test("nearby source hints are sent for research but cannot authorize an unsearched coordinate source", async () => {
   const original = globalThis.fetch;
   const hinted = "https://example.com/discovery-only";
