@@ -137,7 +137,7 @@ function QueueChart({ evidence, beforeOpening }: {
         </div>
         <p className="queue-onset">확보된 기록 중 첫 대기 보고: {points.filter(p => p.kind === "observed" && p.max > 0).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).map(p => `${p.date} ${p.time}`)[0] || "미확인"}. 실제 대기 시작과 다를 수 있습니다.</p>
         {points.map((p, i) => <a className="queue-source" href={p.sourceUrl} target="_blank" rel="noopener noreferrer" key={i}>{p.date} {p.time} 과거 기록 출처 <Icon name="link" size={14}/></a>)}
-    </div> : <div className="no-queue"><Icon name="clock" size={32}/><h4>{beforeOpening ? "아직 시작 전인 행사예요." : "시간대별 대기 근거가 부족해요."}</h4><p>{beforeOpening ? "조회일 기준 행사 시작 전이라 이번 행사의 현장 대기 후기가 없습니다. 운영 시간만으로 혼잡도나 대기 시작 시점을 예측하지 않습니다." : "혼잡도 그래프와 웨이팅 시작 시점을 만들 수 없습니다. 방문 일정이 제공되는 경우 대기 여유를 별도로 확보합니다."}</p></div>;
+    </div> : <div className="no-queue"><Icon name="clock" size={32}/><h4>{beforeOpening ? "아직 시작 전인 행사예요." : "확인된 대기 정보만 안내해요."}</h4><p>{beforeOpening ? "조회일 기준 행사 시작 전이라 이번 행사의 현장 대기 후기가 없습니다. 운영 시간만으로 혼잡도나 대기 시작 시점을 예측하지 않습니다." : "현재 확인된 후기만으로는 시간대별 대기 현황을 안내하기 어려워요. 방문 전 공식 안내에서 현장 대기와 입장 방법을 확인해 주세요."}</p></div>;
 }
 function ForecastChart({ evidence, forecasts, preferredDate, beforeOpening }: {
     evidence: PlaceEvidence;
