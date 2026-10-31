@@ -4,6 +4,21 @@ export function json(value: unknown, status = 200, extra: Record<string, string>
   return Response.json(value, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extra } });
 }
 
+/** Keep operator setup details out of production responses, including their error codes. */
+export function researchErrorResponse(error: ResearchError, development = import.meta.env?.DEV === true) {
+  const serviceCodes = new Set(["billing_required", "spend_limit", "usage_limit", "upstream_limit", "not_configured", "model_unavailable", "service_unavailable"]);
+  let message = error.message, code = error.code;
+  if (!development && serviceCodes.has(code)) {
+    message = "현재 분석 서비스를 이용할 수 없습니다. 나중에 다시 확인해 주세요.";
+    code = "service_unavailable";
+  } else if (!development && code === "upstream_rate_limit") {
+    message = "요청이 몰리고 있습니다. 잠시 후 다시 시도해 주세요.";
+    code = "rate_limited";
+  }
+  if (error.status >= 500) console.warn("[PopPin] service request failed", { code: error.code, status: error.status });
+  return json({ error: message, code }, error.status, error.status === 429 ? { "Retry-After": "60" } : {});
+}
+
 export async function digest(value: string) {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");

@@ -67,6 +67,7 @@ test("lookup uses approved model with mandatory bounded live search; unavailable
     const body = JSON.parse(String(init?.body));
     assert.equal(body.model, "gpt-6.1-sol"); assert.equal(body.max_tool_calls, 2); assert.equal(body.max_output_tokens, 3000);
     assert.equal(body.reasoning.effort, "low"); assert.equal(body.store, false); assert.equal(body.tool_choice, "required");
+    assert.ok(body.text.format.schema.properties.candidates.items.properties.classification.properties.category.enum.includes("beauty"));
     assert.equal(body.tools[0].type, "web_search"); assert.equal(body.text.format.strict, true);
     assert.match(body.instructions, /Asia\/Seoul/);
     return Response.json(response());
@@ -148,4 +149,15 @@ test("lookup route caches and deduplicates free results, rejects invalid request
   t.mock.timers.tick(10 * 60_000 + 1);
   assert.equal((await data(await route.POST(request()))).cached, false);
   assert.equal(upstream.calls, 7);
+});
+
+
+test("자동 검색은 상세 장르를 유지하고 출처가 있는 고정 분류만 반환한다", () => {
+  const classification = { version: 1, category: "beauty", subcategory: "skincare", experienceTags: ["product_trial"], sourceUrls: [url] };
+  const lookup = (extra = {}) => parseLookupResponse(response([candidate({ genre: "뷰티·스킨케어 체험", classification: { ...classification, ...extra } })]), input, now).candidates[0];
+  assert.equal(lookup().genre, "뷰티·스킨케어 체험");
+  assert.equal(lookup().classification?.subcategory, "skincare");
+  assert.equal(lookup({ subcategory: "pizza" }).classification?.subcategory, "unclassified");
+  assert.equal(lookup({ sourceUrls: ["https://invented.example/event"] }).classification?.category, "unclassified");
+  assert.equal(parseLookupResponse(response([candidate({ exactNameMatch: false, classification })]), input, now).candidates[0].classification?.category, "unclassified");
 });

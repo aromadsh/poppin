@@ -48,9 +48,9 @@ export function PopupPlaceFields({place:p,index,removable,update,remove,lookup,s
 }
 
 function ReservationFields({ place: p, dateFrom, dateTo, setReservation }: Pick<Props, "place" | "dateFrom" | "dateTo" | "setReservation">) {
-  const [enabled, setEnabled] = useState(Boolean(p.reservation));
-  const [date, setDate] = useState(p.reservation?.date || "");
-  const [time, setTime] = useState(p.reservation?.time || "");
+  const [enabled, setEnabled] = useState(Boolean(p.reservation || p.reservationDraft));
+  const [date, setDate] = useState(p.reservation?.date || p.reservationDraft?.date || "");
+  const [time, setTime] = useState(p.reservation?.time || p.reservationDraft?.time || "");
   const [error, setError] = useState("");
   const confirmed = p.reservation?.date === date && p.reservation?.time === time;
   const id = p.id;
@@ -63,10 +63,10 @@ function ReservationFields({ place: p, dateFrom, dateTo, setReservation }: Pick<
   return <div className="reservation-fields">
     <label className="reservation-toggle"><input type="checkbox" checked={enabled} onChange={e => { setEnabled(e.target.checked); setReservation(id, undefined); setError(""); }}/> 이미 사전 예약한 장소예요</label>
     {enabled && <>
-      <p className="lookup-hint" id={`reservation-hint-${id}`}>예약처의 내 예약 화면에서 행사명과 장소를 확인한 뒤 예약 날짜·시간을 입력하세요. 예약번호·이름·연락처는 입력하지 마세요. 실제 예약 조회·인증 기능은 제공하지 않습니다.</p>
-      <div className="field-row"><div className="field"><label htmlFor={`reservation-date-${id}`}>예약 날짜</label><input id={`reservation-date-${id}`} type="date" required ref={node => { node?.setCustomValidity(confirmed ? "" : "예약 내역 본인 확인 버튼을 눌러 주세요."); }} value={date} min={dateFrom} max={dateTo} aria-describedby={`reservation-hint-${id}`} onChange={e => { setDate(e.target.value); setReservation(id, undefined); setError(""); }}/></div><div className="field"><label htmlFor={`reservation-time-${id}`}>예약 시간</label><input id={`reservation-time-${id}`} type="time" required value={time} onChange={e => { setTime(e.target.value); setReservation(id, undefined); setError(""); }}/></div></div>
-      <button type="button" className="lookup-button" onClick={confirm} disabled={confirmed}>예약 내역 본인 확인·일정에 반영</button>
-      <p role="status" className="lookup-hint">{confirmed ? `본인 확인 입력: ${date} ${time} · 예약처 인증 결과가 아닙니다.` : "확인 버튼을 눌러야 예약 시간이 일정에 반영됩니다."}</p>
+      <p className="lookup-hint" id={`reservation-hint-${id}`}>예약처의 내 예약 화면에서 행사명과 장소를 확인한 뒤 예약 날짜·시간을 입력하세요. 예약번호·이름·연락처는 입력하지 마세요. 입력한 시간을 기준으로 방문 일정을 계산합니다.</p>
+      <div className="field-row"><div className="field"><label htmlFor={`reservation-date-${id}`}>예약 날짜</label><input id={`reservation-date-${id}`} type="date" required ref={node => { node?.setCustomValidity(confirmed ? "" : "예약 시간을 일정에 반영해 주세요."); }} value={date} min={dateFrom} max={dateTo} aria-describedby={`reservation-hint-${id}`} onChange={e => { setDate(e.target.value); setReservation(id, undefined); setError(""); }}/></div><div className="field"><label htmlFor={`reservation-time-${id}`}>예약 시간</label><input id={`reservation-time-${id}`} type="time" required value={time} onChange={e => { setTime(e.target.value); setReservation(id, undefined); setError(""); }}/></div></div>
+      <button type="button" className="lookup-button" onClick={confirm} disabled={confirmed}>예약 시간 일정에 반영</button>
+      <p role="status" className="lookup-hint">{confirmed ? `일정에 반영된 예약 시간: ${date} ${time}` : "반영 버튼을 눌러 예약 시간을 저장해 주세요."}</p>
       {error && <p role="alert" className="lookup-manual-hint">{error}</p>}
     </>}
   </div>;

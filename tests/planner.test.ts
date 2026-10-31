@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Input, PlaceEvidence } from "../lib/planner";
+import { explainPlan } from "../lib/plan-explanation";
 
 // Native Node type stripping resolves the actual TypeScript file at runtime.
 const { validateInput, planVisits } = await import(new URL("../lib/planner.ts", import.meta.url).href) as typeof import("../lib/planner");
@@ -13,7 +14,7 @@ function evidence(index = 0, overrides: Partial<PlaceEvidence> = {}): PlaceEvide
   return { index, matched: true, status: "verified", eventStart: "2026-10-01", eventEnd: "2026-11-30", hours: [{ date: "2026-10-30", open: "10:00", close: "18:00" }], admission: { reservation: "not_required", lastEntry: null, note: "예약 없이 현장 입장" }, lat: 37.54, lng: 127.05, value: "관심 굿즈", summary: "공식 운영 공지", queue: [], sources: [{ title: "공식 공지", url: "https://example.com/official", publishedAt: null, matched: true, note: "운영 확인" }], ...overrides };
 }
 
-test("예약 본인 확인은 예약 날짜와 시각에만 반영하고 운영 근거는 계속 요구한다", () => {
+test("입력한 예약은 예약 날짜와 시각에만 반영하고 운영 근거는 계속 요구한다", () => {
   const raw = input();
   Object.assign(raw.places[0], { reservation: { date: "2026-10-30", time: "13:00", confirmed: true } });
   const ev = evidence(0, { admission: { reservation: "required_unknown", lastEntry: null, note: "사전 예약 필수" } });
@@ -83,6 +84,20 @@ test("이동시간 때문에 불가능한 전체 경로는 부분 방문으로 �
   assert.equal(result.days[0].complete, false);
   assert.equal(result.days[0].stops.length, 1);
   assert.equal(result.excluded.length, 1);
+});
+
+test("행사를 찾았어도 영업시간이 없으면 검색 실패와 구분해 제외한다", () => {
+  const result = planVisits(input(), [evidence(0, { hours: [], admission: { reservation: "unknown", lastEntry: null, note: "미확인" } })], now);
+  assert.equal(result.days.length, 0);
+  assert.match(result.excluded[0].reason, /행사는 확인.*영업시간/);
+});
+
+test("확인되지 않은 장소 후보는 다른 필드가 verified여도 일정을 생성하지 않는다", () => {
+  for (const locationStatus of ["ambiguous", "mismatch", "unknown"] as const) {
+    const result = planVisits(input(), [evidence(0, { identity: { name: "팝업 0", venue: "후보 행사장", address: null, locationStatus, note: "장소 근거 부족", sourceUrls: [] } })], now);
+    assert.equal(result.days.length, 0);
+    assert.match(result.excluded[0].reason, /장소|주소/);
+  }
 });
 
 test("좌표 없는 장소는 단독 방문만 허용한다", () => {
@@ -210,6 +225,100 @@ test("같은 방문 수에서는 미확인 30분을 짧은 대기로 간주해 �
   assert.equal(day.complete, true);
 });
 
+test("예약 제공·매진과 현장 입장 가능 여부를 독립적으로 처리한다", () => {
+  for (const reservation of ["available", "sold_out", "unknown"] as const) {
+    const ev = evidence(0, { admission: { reservation, lastEntry: null, note: "예약 정보", walkIn: { status: "available", note: "현장 접수 가능", sourceUrl: "https://example.com/official" } } });
+    const result = planVisits(input(), [ev], now);
+    assert.equal(result.days.length, 1, reservation);
+    assert.equal(result.reservationCandidates.length, 0);
+    assert.equal(result.conditionalDays.length, 0);
+    assert.equal(result.days[0].stops[0].waitMax, 30);
+    assert.equal(result.days[0].stops[0].waitKnown, false);
+  }
+});
+
+test("예약 제공만으로 현장 입장을 허용하지 않고 예약 완료는 고정 시각을 지킨다", () => {
+  const ev = evidence(0, { admission: { reservation: "available", lastEntry: null, note: "사전예약", walkIn: { status: "unavailable", note: "예약자만 입장", sourceUrl: "https://example.com/official" } } });
+  const noBooking = planVisits(input(), [ev], now);
+  assert.equal(noBooking.days.length, 0);
+  assert.equal(noBooking.conditionalDays.length, 0);
+  assert.equal(noBooking.reservationCandidates.length, 1);
+  const request = input(); request.places[0].reservation = { date: "2026-10-30", time: "13:00", confirmed: true };
+  const booked = planVisits(request, [ev], now);
+  assert.equal(booked.days[0].stops[0].arrival, "13:00");
+  request.timeFrom = "13:01";
+  assert.equal(planVisits(request, [ev], now).days.length, 0);
+});
+
+test("입장 정책 미확인은 확정 일정과 분리된 조건부 일정으로만 표시한다", () => {
+  const ev = evidence(0, { admission: { reservation: "unknown", lastEntry: "16:00", note: "정책 미확인" } });
+  const result = planVisits(input(), [ev], now);
+  assert.equal(result.days.length, 0);
+  assert.equal(result.conditionalDays.length, 1);
+  assert.equal(result.conditionalDays[0].conditional, true);
+  assert.match(result.conditionalDays[0].stops[0].condition!, /입장 방법 미확인/);
+  assert.equal(result.conditionalDays[0].stops[0].waitMax, 30);
+  assert.equal(result.reservationCandidates.length, 0);
+  assert.match(result.excluded[0].reason, /조건부/);
+  const tooLate = input(); tooLate.timeFrom = "16:00";
+  assert.equal(planVisits(tooLate, [ev], now).conditionalDays.length, 0);
+});
+
+test("행사·시간·출처·좌표 검증을 조건부 일정에서도 우회하지 않는다", () => {
+  const unknown = evidence(0, { admission: undefined });
+  for (const overrides of [{ hours: [] }, { matched: false }, { status: "unconfirmed" as const }, { status: "past" as const }, { sources: [] }, { eventEnd: "2026-10-29" }, { admission: { reservation: "unknown" as const, note: "미확인", lastEntry: null, invalidLastEntry: true as const } }]) {
+    assert.equal(planVisits(input(), [{ ...unknown, ...overrides }], now).conditionalDays.length, 0);
+  }
+  const explicitNo = evidence(0, { admission: { reservation: "unknown", lastEntry: null, note: "미확인", walkIn: { status: "unavailable", note: "현장 불가", sourceUrl: "https://example.com/official" } } });
+  assert.equal(planVisits(input(), [explicitNo], now).conditionalDays.length, 0);
+  const mixed = planVisits(input(2), [evidence(), { ...unknown, index: 1, lat: null, lng: null }], now);
+  assert.equal(mixed.days[0].stops.length, 1);
+  assert.equal(mixed.conditionalDays[0].stops.length, 1);
+  assert.equal(mixed.conditionalDays[0].stops[0].index, 1);
+});
+
+test("조건부 대안은 확정 일정을 대체하지 않으며 실제 계산값으로 시간을 설명한다", () => {
+  const request = input(2);
+  request.places[0].reservation = { date: "2026-10-30", time: "10:00", confirmed: true };
+  const result = planVisits(request, [evidence(), evidence(1, { admission: undefined, hours: [{ date: "2026-10-30", open: "13:00", close: "18:00" }] })], now);
+  assert.equal(result.days[0].stops.length, 1);
+  assert.equal(result.conditionalDays[0].stops.length, 2);
+  const day = result.conditionalDays[0], info = explainPlan(day);
+  assert.equal(info.travel + info.stay + info.wait + info.openingGap, info.total);
+  assert.equal(info.unknownWait, 60);
+  assert.equal(info.visits, 2);
+  assert.equal(info.openingGap, 90);
+});
+
+test("화면은 사전예약·현장 입장을 따로 표시하고 조건부 시각을 확정처럼 안내하지 않는다", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { AdmissionSummary } = await import(new URL("../components/admission-summary.tsx", import.meta.url).href) as typeof import("../components/admission-summary");
+  const { ConditionalPlans } = await import(new URL("../components/conditional-plans.tsx", import.meta.url).href) as typeof import("../components/conditional-plans");
+  const mixed = evidence(0, { admission: { reservation: "sold_out", lastEntry: null, note: "예약 매진", walkIn: { status: "available", note: "현장 대기 가능", sourceUrl: "https://example.com/official" } } });
+  const admissionHtml = renderToStaticMarkup(createElement(AdmissionSummary, { evidence: mixed }));
+  assert.match(admissionHtml, /매진/);
+  assert.match(admissionHtml, /가능 · 대기 별도/);
+  assert.doesNotMatch(admissionHtml, /href=|현장 대기 가능/);
+  const timed = evidence(0, { hours: [{ date: "2026-10-30", open: "11:00", close: "19:00", lastEntry: "18:00" }], admission: { reservation: "unknown", lastEntry: null, note: "네이버 사전예약 안내. 예약 10분 전 도착. 잔여 회차는 미확인." } });
+  const compact = renderToStaticMarkup(createElement(AdmissionSummary, { evidence: timed, date: "2026-10-30" }));
+  assert.match(compact, /11:00–19:00/);
+  assert.match(compact, /18:00/);
+  assert.match(compact, /예약 10분 전 도착/);
+  assert.doesNotMatch(compact, /잔여 회차/);
+  const otherDate = renderToStaticMarkup(createElement(AdmissionSummary, { evidence: timed, date: "2026-10-31" }));
+  assert.doesNotMatch(otherDate, /11:00–19:00|18:00/);
+  const qa = renderToStaticMarkup(createElement(AdmissionSummary, { evidence: mixed, diagnostics: true }));
+  assert.match(qa, /현장 대기 가능|현장 입장 안내 출처/);
+  assert.match(qa, /https:\/\/example.com\/official/);
+  const result = planVisits(input(), [evidence(0, { admission: undefined })], now);
+  const conditionalHtml = renderToStaticMarkup(createElement(ConditionalPlans, { days: result.conditionalDays }));
+  assert.match(conditionalHtml, /방문 가능이 확인된 일정이 아닙니다/);
+  assert.match(conditionalHtml, /입장 방법 미확인/);
+  assert.match(conditionalHtml, /실제 대기시간 예측값이 아닙니다/);
+  assert.equal(renderToStaticMarkup(createElement(ConditionalPlans, { days: [] })), "");
+});
+
 function reservationEvidence(overrides: Partial<PlaceEvidence> = {}): PlaceEvidence {
   return evidence(0, { admission: { reservation: "required_unknown", lastEntry: null, note: "전면 예약제 · 11월 4일 예약 오픈", sourceUrl: "https://example.com/official" }, ...overrides });
 }
@@ -235,11 +344,11 @@ test("예약 가능 안내도 예약 후보로만 남기고 현장 입장 일정
   assert.equal(result.reservationCandidates.length, 1);
   assert.equal(result.reservationCandidates[0].index, 0);
   assert.deepEqual(result.days[0].stops.map(stop => stop.index), [1]);
-  assert.match(result.excluded[0].reason, /예약.*본인 확인/);
+  assert.match(result.excluded[0].reason, /예약.*날짜/);
   assert.deepEqual(planVisits(input(), [evidence()], now).reservationCandidates, []);
 });
 
-test("본인 확인한 예약은 지정 일시에만 계산하고 미예약 장소만 예약 후보로 남긴다", () => {
+test("입력한 예약은 지정 일시에만 계산하고 미예약 장소만 예약 후보로 남긴다", () => {
   const request = input(2); request.dateTo = "2026-10-31";
   request.places[0].reservation = { date: "2026-10-31", time: "13:00", confirmed: true };
   const hours = ["2026-10-30", "2026-10-31"].map(date => ({ date, open: "10:00", close: "18:00" }));

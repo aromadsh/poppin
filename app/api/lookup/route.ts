@@ -1,6 +1,6 @@
 import { lookupPlace, validateLookupInput, type LookupResult } from "@/lib/lookup";
 import { ResearchError } from "@/lib/research";
-import { json, digest, apiKey, readJsonBody, sameOrigin, acquireBudget } from "@/lib/api-guard";
+import { json, digest, apiKey, readJsonBody, sameOrigin, acquireBudget, researchErrorResponse } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 const TTL = 10 * 60_000;
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     try { return json({ ...await task, cached: false }); }
     finally { inflight.delete(key); release(); }
   } catch (error) {
-    if (error instanceof ResearchError) return json({ error: error.message, code: error.code }, error.status, error.status === 429 ? { "Retry-After": "60" } : {});
+    if (error instanceof ResearchError) return researchErrorResponse(error);
     return json({ error: "검색 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "internal_error" }, 500);
   }
 }

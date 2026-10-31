@@ -8,5 +8,5 @@ export function usePopupPlaces(dateFrom: string, dateTo: string) {
   const places = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   useEffect(() => { controller.activate(); return controller.deactivate; }, [controller]);
   useEffect(() => { controller.setDates(dateFrom, dateTo); }, [controller, dateFrom, dateTo]);
-  return { places, addPlace: controller.addPlace, removePlace: controller.removePlace, updatePlace: controller.updatePlace, lookupNow: controller.lookupNow, selectCandidate: controller.selectCandidate, resolvePlaces: controller.resolvePlaces, setComposing: controller.setComposing, setReservation: controller.setReservation };
+  return { places, loadPreset: controller.loadPreset, addPlace: controller.addPlace, removePlace: controller.removePlace, updatePlace: controller.updatePlace, lookupNow: controller.lookupNow, selectCandidate: controller.selectCandidate, resolvePlaces: controller.resolvePlaces, setComposing: controller.setComposing, setReservation: controller.setReservation };
 }

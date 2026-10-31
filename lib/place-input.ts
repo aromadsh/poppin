@@ -1,9 +1,12 @@
 import type { Input } from "./planner";
+import type { EventClassification } from "./event-taxonomy";
 import type { LookupCandidate, LookupResult } from "./lookup";
 
 export type PlaceRow = Input["places"][number] & {
   id: string;
-  lookupStatus: "idle" | "scheduled" | "loading" | "resolved" | "choices" | "not_found" | "past" | "unconfirmed" | "error";
+  classification?: EventClassification;
+  lookupStatus: "idle" | "scheduled" | "loading" | "resolved" | "choices" | "not_found" | "past" | "unconfirmed" | "error" | "manual";
+  reservationDraft?: { date: string; time: string };
   lookupMessage: string;
   lookupResult?: LookupResult;
   autoAddress: boolean;
@@ -20,6 +23,8 @@ const messages = {
   unconfirmed: "현재 행사 정보를 확인하지 못했어요. 출처를 확인하거나 주소와 장르를 직접 입력해 주세요.",
   error: "자동 검색에 실패했어요. 다시 검색하거나 주소와 장르를 직접 입력해 주세요.",
   timeout: "검색 시간이 초과됐어요. 주소와 장르를 직접 입력하거나 나중에 다시 검색해 주세요.",
+  connection: "검색 서버에 연결하지 못했어요. 서버 실행 상태와 연결을 확인한 뒤 다시 시도해 주세요.",
+  response: "검색 서버의 응답을 읽을 수 없어요. 잠시 후 다시 시도하거나 주소와 장르를 직접 입력해 주세요.",
 };
 function validDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
@@ -45,7 +50,7 @@ export class PopupPlacesController {
   private revision = 0;
   private active = true;
 
-  constructor(private dateFrom: string, private dateTo: string, private fetcher: typeof fetch = fetch) {
+  constructor(private dateFrom: string, private dateTo: string, private fetcher: typeof fetch = (...args) => globalThis.fetch(...args)) {
     this.addPlace();
   }
   getSnapshot = () => this.places;
@@ -97,6 +102,23 @@ export class PopupPlacesController {
     this.revision++;
     this.emit();
   };
+  loadPreset = (input: Input, drafts: { placeIndex: number; date: string; time: string }[] = [], message = "테스트 프리셋 입력값 · 실시간 검색 전") => {
+    if (!input.places.length || input.places.length > 3) throw new Error("프리셋은 1~3곳을 포함해야 합니다.");
+    for (const row of this.places) this.cancel(row.id);
+    this.rows.clear();
+    this.dateFrom = input.dateFrom;
+    this.dateTo = input.dateTo;
+    this.places = input.places.map((place, index) => {
+      const id = `popup-${++this.nextId}`;
+      this.rows.set(id, { generation: 0, manualAddress: true, manualGenre: true, composing: false });
+      const draft = drafts.find(draft => draft.placeIndex === index);
+      return { ...place, ...(place.reservation ? { reservation: { ...place.reservation } } : {}), id,
+        ...(draft ? { reservationDraft: { date: draft.date, time: draft.time } } : {}),
+        lookupStatus: "manual", lookupMessage: message, autoAddress: false, autoGenre: false };
+    });
+    this.revision++;
+    this.emit();
+  };
   removePlace = (id: string) => {
     if (!this.rows.has(id)) return;
     this.cancel(id);
@@ -110,9 +132,9 @@ export class PopupPlacesController {
     if (!row || !state || row[key] === value) return;
     if ((key === "stayMinutes") !== (typeof value === "number")) return;
     this.revision++;
-    if (key === "name" || key === "address") this.patch(id, { reservation: undefined });
+    if (key === "name" || key === "address") this.patch(id, { reservation: undefined, reservationDraft: undefined, classification: undefined });
     if (key === "address") state.manualAddress = true;
-    if (key === "genre") state.manualGenre = true;
+    if (key === "genre") { state.manualGenre = true; this.patch(id, { classification: undefined }); }
     if (key === "name") {
       this.cancel(id);
       this.patch(id, { name: value as string, ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
@@ -136,7 +158,7 @@ export class PopupPlacesController {
     this.dateFrom = from; this.dateTo = to; this.revision++;
     for (const row of this.places) {
       this.cancel(row.id);
-      this.patch(row.id, { reservation: undefined, ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
+      this.patch(row.id, { reservation: undefined, reservationDraft: undefined, classification: undefined, ...(row.autoAddress ? { address: "", autoAddress: false } : {}), ...(row.autoGenre ? { genre: "", autoGenre: false } : {}), lookupResult: undefined, lookupStatus: "idle", lookupMessage: "" });
       this.schedule(row.id);
     }
   };
@@ -156,14 +178,21 @@ export class PopupPlacesController {
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const lookup = async () => {
-        const response = await this.fetcher("/api/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: controller.signal });
+        let response: Response;
+        try {
+          response = await this.fetcher("/api/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: controller.signal });
+        } catch (error) {
+          failureMessage = messages.connection;
+          throw error;
+        }
         if (!response.ok) {
           const error = await response.json().catch(() => null) as { error?: unknown } | null;
           if (typeof error?.error === "string" && error.error.trim()) failureMessage = `${error.error.trim().slice(0, 240)} 주소와 장르를 직접 입력해 계속할 수도 있어요.`;
           throw new Error(failureMessage);
         }
+        failureMessage = messages.response;
         const data = await response.json() as LookupResult;
-        if (!data || !["unique", "multiple", "not_found", "past", "unconfirmed"].includes(data.status) || !Array.isArray(data.candidates)) throw new Error(messages.error);
+        if (!data || !["unique", "multiple", "not_found", "past", "unconfirmed"].includes(data.status) || !Array.isArray(data.candidates)) throw new Error(messages.response);
         if (!controller.signal.aborted) {
           if (this.cache.size >= 64) this.cache.delete(this.cache.keys().next().value!);
           this.cache.set(key, { result: data, expires: Date.now() + 5 * 60_000 });
@@ -196,7 +225,7 @@ export class PopupPlacesController {
     const row = this.places.find(row => row.id === id)!;
     if (!state.manualAddress && row.address !== candidate.address) this.patch(id, { reservation: undefined });
     const genre = state.manualGenre ? this.places.find(row => row.id === id)?.genre : candidate.genre;
-    this.patch(id, { ...(!state.manualAddress ? { address: candidate.address, autoAddress: true } : {}), ...(!state.manualGenre ? { genre: candidate.genre || "", autoGenre: Boolean(candidate.genre?.trim()) } : {}), lookupStatus: "resolved", lookupMessage: genre?.trim() ? messages.unique : "주소를 확인했어요. 장르는 직접 입력해 주세요." });
+    this.patch(id, { classification: !state.manualGenre && (!state.manualAddress || row.address === candidate.address) ? candidate.classification : undefined, ...(!state.manualAddress ? { address: candidate.address, autoAddress: true } : {}), ...(!state.manualGenre ? { genre: candidate.genre || "", autoGenre: Boolean(candidate.genre?.trim()) } : {}), lookupStatus: "resolved", lookupMessage: genre?.trim() ? messages.unique : "주소를 확인했어요. 장르는 직접 입력해 주세요." });
     return true;
   }
   lookupNow = (id: string): Promise<void> => {

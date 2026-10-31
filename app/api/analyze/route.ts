@@ -1,7 +1,7 @@
 import { validateInput, planVisits, type Input } from "@/lib/planner";
 import { researchPlaces, ResearchError } from "@/lib/research";
 import { forecastQueues } from "@/lib/forecast";
-import { json, digest, apiKey, readJsonBody, sameOrigin, acquireBudget } from "@/lib/api-guard";
+import { json, digest, apiKey, readJsonBody, sameOrigin, acquireBudget, researchErrorResponse } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 const TTL = 10 * 60_000;
@@ -10,7 +10,7 @@ const cache = new Map<string, { expires: number; value: Research }>();
 const inflight = new Map<string, Promise<Research>>();
 function analyze(input: Input, result: Research, cached: boolean) {
   const now = new Date();
-  return json({ ...result, plan: planVisits(input, result.evidence, now), forecasts: forecastQueues(input, result.evidence, now), cached });
+  return json({ ...result, plan: planVisits(input, result.evidence, now, result.tasteSignals), forecasts: forecastQueues(input, result.evidence, now), cached });
 }
 
 export async function POST(request: Request) {
@@ -47,7 +47,7 @@ export async function POST(request: Request) {
     inflight.set(key, task);
     try { return analyze(input, await task, false); } finally { inflight.delete(key); release(); }
   } catch (error) {
-    if (error instanceof ResearchError) return json({ error: error.message, code: error.code }, error.status, error.status === 429 ? { "Retry-After": "60" } : {});
+    if (error instanceof ResearchError) return researchErrorResponse(error);
     return json({ error: "분석 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "internal_error" }, 500);
   }
 }

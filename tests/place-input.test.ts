@@ -1,4 +1,6 @@
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import type { Input } from "../lib/planner";
 import assert from "node:assert/strict";
 import { PopupPlacesController } from "../lib/place-input";
 import type { LookupCandidate, LookupResult } from "../lib/lookup";
@@ -14,6 +16,42 @@ function setup() {
   return { controller, id, calls, row: () => controller.getSnapshot().find(row => row.id === id)! };
 }
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("automatic lookup calls the default browser fetch with its global receiver", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async function (this: unknown) {
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    calls++;
+    return Response.json(result());
+  } as typeof fetch;
+  const c = new PopupPlacesController(...dates);
+  t.after(() => { c.deactivate(); globalThis.fetch = original; });
+  const id = c.getSnapshot()[0].id;
+  c.updatePlace(id, "name", "코치 'LIVE YOUR STORY' 팝업");
+  t.mock.timers.tick(1200);
+  await settle();
+  assert.equal(calls, 1);
+  assert.equal(c.getSnapshot()[0].lookupStatus, "resolved");
+});
+
+test("connection and unreadable responses stay distinct from a sourced empty search", async t => {
+  for (const [fetcher, expected] of [
+    [async () => { throw new TypeError("private network details"); }, /연결하지 못/],
+    [async () => new Response("<html>server error</html>"), /응답을 읽을 수 없/],
+    [async () => Response.json({ unexpected: true }), /응답을 읽을 수 없/],
+    [async () => Response.json(result("not_found", [])), /일치하는 행사를 찾지 못/],
+  ] as const) {
+    const c = new PopupPlacesController(...dates, fetcher as typeof fetch);
+    t.after(() => c.deactivate());
+    const id = c.getSnapshot()[0].id;
+    c.updatePlace(id, "name", "테스트 팝업");
+    await c.lookupNow(id);
+    assert.match(c.getSnapshot()[0].lookupMessage, expected);
+    assert.doesNotMatch(c.getSnapshot()[0].lookupMessage, /private network|<html>/);
+  }
+});
 
 test("confirmed reservation survives submission and clears when event identity changes", async t => {
   const { controller: c, id, calls } = setup(); t.after(() => c.deactivate());
@@ -239,4 +277,52 @@ test("a verified address still autofills when genre is unknown and manual genre 
   await assert.rejects(c.resolvePlaces(), /장르.*직접|주소와 장르.*직접/);
   c.updatePlace(id, "genre", "수동 장르"); assert.equal((await c.resolvePlaces())[0].genre, "수동 장르");
   assert.equal(calls.length, 1);
+});
+
+
+test("preset restores saved inputs and an unapplied reservation without automatic lookup", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: new Date("2026-10-31T00:00:00Z").getTime() });
+  const preset = JSON.parse(readFileSync(new URL("./fixtures/seongsu-manual-input-20261031.json", import.meta.url), "utf8")) as { input: Input; reservationDrafts: { placeIndex: number; date: string; time: string }[] };
+  const { controller: c, id, calls } = setup(); t.after(() => c.deactivate());
+  c.updatePlace(id, "name", "이전 입력");
+  c.loadPreset(preset.input, preset.reservationDrafts);
+  c.setDates(preset.input.dateFrom, preset.input.dateTo);
+  c.deactivate(); c.activate();
+  t.mock.timers.tick(10000); await settle();
+  assert.equal(calls.length, 0);
+  assert.equal(c.getSnapshot().length, 3);
+  assert.equal(c.getSnapshot()[0].stayMinutes, 120);
+  assert.deepEqual(c.getSnapshot()[0].reservationDraft, { date: "2026-11-02", time: "14:00" });
+  assert.equal(c.getSnapshot()[0].reservation, undefined);
+  assert.equal(c.getSnapshot()[0].lookupStatus, "manual");
+  assert.deepEqual(await c.resolvePlaces(), preset.input.places);
+  const firstId = c.getSnapshot()[0].id;
+  c.loadPreset(preset.input, preset.reservationDrafts);
+  assert.notEqual(c.getSnapshot()[0].id, firstId);
+  assert.equal(calls.length, 0);
+});
+
+test("preset replacement aborts pending lookup and rejects stale results", async t => {
+  const { controller: c, id, calls } = setup(); t.after(() => c.deactivate());
+  c.updatePlace(id, "name", "이전 입력");
+  const pending = c.lookupNow(id);
+  c.loadPreset({ places: [{ name: "저장한 입력", address: "저장한 주소", genre: "뷰티", stayMinutes: 45 }], dateFrom: dates[0], dateTo: dates[1], timeFrom: "11:00", timeTo: "19:00", preferences: "" });
+  assert.equal(calls[0].signal.aborted, true);
+  calls[0].answer(result()); await pending;
+  assert.equal(c.getSnapshot()[0].address, "저장한 주소");
+  assert.equal(c.getSnapshot()[0].lookupResult, undefined);
+  assert.equal(calls.length, 1);
+});
+
+
+test("자동 분류는 입력 상태에 보관하고 장르·장소 수정 시 초기화한다", async t => {
+  const classification = { version: 1 as const, category: "beauty" as const, subcategory: "skincare" as const, experienceTags: ["product_trial" as const], sourceUrls: ["https://example.com/popup"] };
+  for (const field of ["genre", "name", "address"] as const) {
+    const { controller: c, id, calls, row } = setup(); t.after(() => c.deactivate());
+    c.updatePlace(id, "name", "테스트 팝업");
+    const lookup = c.lookupNow(id); calls[0].answer(result("unique", [candidate("a", { classification })])); await lookup;
+    assert.deepEqual(row().classification, classification);
+    c.updatePlace(id, field, "직접 수정");
+    assert.equal(row().classification, undefined);
+  }
 });

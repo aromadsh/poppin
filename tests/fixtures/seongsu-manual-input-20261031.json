@@ -1,0 +1,36 @@
+{
+  "id": "seongsu-manual-20261031",
+  "savedOn": "2026-10-31",
+  "kind": "user_input_snapshot",
+  "note": "수동 재현용 입력값. 실제 운영 및 예약 가능 여부의 정답이나 API 저장 응답이 아님.",
+  "input": {
+    "places": [
+      {
+        "name": "방탈출 게임 <점프x컷> 2.0",
+        "address": "서울특별시 성동구 성수이로18길 5",
+        "genre": "미디어 리터러시 방탈출 체험",
+        "stayMinutes": 120
+      },
+      {
+        "name": "리바이포유 10주년",
+        "address": "서울 성동구 연무장길 65 LECT성수",
+        "genre": "뷰티·스킨케어 체험",
+        "stayMinutes": 45
+      },
+      {
+        "name": "Dear Bestie Party 핑크오피스 팝업",
+        "address": "서울특별시 성동구 연무장길 88",
+        "genre": "뷰티·화장품 체험 팝업",
+        "stayMinutes": 45
+      }
+    ],
+    "dateFrom": "2026-10-31",
+    "dateTo": "2026-11-06",
+    "timeFrom": "11:00",
+    "timeTo": "19:00",
+    "preferences": "붐비는 시간대에는 피하고 싶고 최적의 동선 최소 대기시간으로 찾아줘"
+  },
+  "reservationDrafts": [
+    { "placeIndex": 0, "date": "2026-11-02", "time": "14:00", "applied": false }
+  ]
+}
