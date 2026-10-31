@@ -1,7 +1,8 @@
 import { planVisits, validateInput, walkInStatus, type DayPlan, type Input, type PlaceEvidence } from "./planner";
 import { ResearchError, researchPlaces, validDate } from "./research";
-import { scoreTaste, type TasteSignal } from "./taste-scoring";
+import { scoreTaste, tasteLabel, type TasteSignal } from "./taste-scoring";
 import { normalizeClassification } from "./event-taxonomy";
+import { buildSearchPlan } from "./search-plan";
 import { discoverNearby, type DiscoveryCandidate, type DiscoveryQuery } from "./nearby-discovery";
 import type { ResearchSnapshot } from "./analysis-store";
 
@@ -12,7 +13,8 @@ export type NearbyRecommendation = {
   additionalTravelMinutes: number | null; additionalTotalMinutes: number | null;
   proposedInput: Input; plan: DayPlan | null; retrievedAt: string;
 };
-export type NearbyReport = { recommendations: NearbyRecommendation[]; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string; replaceIndex: number | null };
+export type NearbyUnlocated = { name: string; address: string; genre: string; eventStart: string; eventEnd: string; sourceUrl: string };
+export type NearbyReport = { recommendations: NearbyRecommendation[]; unlocated: NearbyUnlocated[]; verificationIncomplete?: boolean; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string; replaceIndex: number | null };
 const keyText = (s: string) => s.normalize("NFKC").toLowerCase().replace(/팝업스토어|팝업|[^\p{L}\p{N}]/gu, "");
 export function sameEvent(a: Input["places"][number], b: Input["places"][number]) {
   return keyText(a.name) === keyText(b.name) && keyText(a.address) === keyText(b.address);
@@ -119,9 +121,19 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
   return async (input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string, secret: string, now = new Date()): Promise<NearbyReport> => {
     const anchor = validateNearbySelection(input, research, anchorIndex, replaceIndex, date, now);
     const address = anchor.identity?.address || input.places[anchorIndex].address;
-    const area = address.split(/\s+/).filter(part => /(?:구|군|동)$/.test(part)).join(" ") || address;
-    const query: DiscoveryQuery = { area, lat: anchor.lat!, lng: anchor.lng!, dateFrom: input.dateFrom, dateTo: input.dateTo };
-    const key = JSON.stringify([area, anchor.lat!.toFixed(2), anchor.lng!.toFixed(2), input.dateFrom, input.dateTo]);
+    const area = buildSearchPlan({ ...input, places: [{ ...input.places[anchorIndex], address }] })[0].regionHints.join(" ") || address;
+    const signals = research.tasteSignals ?? [];
+    const anchorTopic = classification(anchor);
+    const topics = [...new Set([
+      ...signals.filter(s => s.direction === "like").map(tasteLabel),
+      tasteLabel({ axis: "category", id: anchorTopic.category }),
+      tasteLabel({ axis: "subcategory", id: anchorTopic.subcategory }),
+      ...anchorTopic.experienceTags.map(id => tasteLabel({ axis: "experience", id })),
+    ])].filter(label => label !== "미분류");
+    const query: DiscoveryQuery = { area, address, anchorName: anchor.identity?.name || input.places[anchorIndex].name,
+      lat: anchor.lat!, lng: anchor.lng!, dateFrom: date, dateTo: date, topics, preferences: input.preferences,
+      excludedNames: input.places.map(p => p.name) };
+    const key = JSON.stringify(query);
     for (const cache of [catalogs, verified]) for (const [id, item] of cache) if (item.expires <= now.getTime()) cache.delete(id);
     let searchCount = 0, cached = true;
     let catalog = catalogs.get(key);
@@ -135,33 +147,53 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
         catalogs.set(key, catalog); searchCount += value.searchCount; cached = false;
       } finally { pendingDiscovery.delete(key); }
     }
-    const signals = research.tasteSignals ?? [];
     const leads = catalog.value.candidates.filter(c => !input.places.some(p => keyText(p.name) === keyText(c.name)));
     const score = (lead: DiscoveryCandidate) => affinity({ ...anchor, classification: lead.classification,
       sources: lead.classification.sourceUrls.map(url => ({ title: "발견 근거", url, matched: true, publishedAt: null, note: "후보 분류" })) }, research.evidence, input.preferences, signals).score;
     // Discovery classification is only a preliminary shortlist signal; verified evidence is used in final ranking.
     leads.sort((a, b) => score(b) - score(a));
-    const selected = leads.slice(0, 3);
-    if (!selected.length) return { recommendations: [], retrievedAt: catalog.retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount: 0, date, replaceIndex };
-    const verificationInput: Input = { ...input, preferences: "", places: selected.map(c => ({ name: c.name, address: c.address, genre: c.genre || "미분류", stayMinutes: 45 })) };
-    const verificationKey = JSON.stringify(verificationInput);
-    let checked = verified.get(verificationKey)?.value;
-    if (!checked) {
-      let task = pendingResearch.get(verificationKey);
-      if (!task) { task = deps.research(verificationInput, secret); pendingResearch.set(verificationKey, task); }
-      try {
-        checked = await task;
-        if (verified.size >= 50) verified.delete(verified.keys().next().value!);
-        verified.set(verificationKey, { expires: now.getTime() + TTL, value: checked });
-        searchCount += checked.searchCount; cached = false;
-      } finally { pendingResearch.delete(verificationKey); }
-    }
-    const recommendations = rankNearby(input, research, anchorIndex, replaceIndex, date,
-      selected.flatMap((lead, index) => {
+    let checkedCount = 0, retrievedAt = catalog.retrievedAt, verificationIncomplete = false;
+    const candidates: Parameters<typeof rankNearby>[5] = [];
+    let recommendations: NearbyRecommendation[] = [];
+    // Check later leads when early ones fail location/date verification. Each research request accepts at most three places.
+    for (let offset = 0; offset < Math.min(leads.length, 8)
+      && recommendations.filter(item => ["ready", "needs_confirmation", "reservation_required"].includes(item.status)).length < 3; offset += 3) {
+      const selected = leads.slice(offset, Math.min(offset + 3, 8));
+      const verificationInput: Input = { ...input, dateFrom: date, dateTo: date, preferences: "", places: selected.map(c => ({ name: c.name, address: c.address, genre: c.genre || "미분류", stayMinutes: 45 })) };
+      const verificationKey = JSON.stringify(verificationInput);
+      let checked = verified.get(verificationKey)?.value;
+      if (!checked) {
+        try {
+          let task = pendingResearch.get(verificationKey);
+          if (!task) { task = deps.research(verificationInput, secret, selected.map((lead, index) => ({ index, urls: lead.sourceUrls ?? [] }))); pendingResearch.set(verificationKey, task); }
+          checked = await task;
+          if (verified.size >= 50) verified.delete(verified.keys().next().value!);
+          verified.set(verificationKey, { expires: now.getTime() + TTL, value: checked });
+          searchCount += checked.searchCount; cached = false;
+        } catch (error) {
+          if (!checkedCount) throw error;
+          verificationIncomplete = true;
+          break;
+        } finally { pendingResearch.delete(verificationKey); }
+      }
+      checkedCount += selected.length;
+      retrievedAt = checked.retrievedAt;
+      candidates.push(...selected.flatMap((lead, index) => {
         const ev = checked!.evidence.find(e => e.index === index);
         return ev ? [{ place: verificationInput.places[index], evidence: ev, retrievedAt: checked!.retrievedAt }] : [];
-      }), now);
-    return { recommendations, retrievedAt: checked.retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount: selected.length, date, replaceIndex };
+      }));
+      recommendations = rankNearby(input, research, anchorIndex, replaceIndex, date, candidates, now);
+    }
+    const unlocated = candidates.flatMap(({ place, evidence: ev }): NearbyUnlocated[] => {
+      const sourceUrl = ev.sources.find(s => s.matched && ev.identity?.sourceUrls.includes(s.url))?.url;
+      if (!ev.matched || ev.status !== "verified" || ev.identity?.locationStatus !== "confirmed" || !sourceUrl
+        || ev.lat != null && ev.lng != null || !ev.eventStart || !ev.eventEnd || date < ev.eventStart || date > ev.eventEnd
+        || input.places.some(p => sameEvent(p, place) || keyText(p.name) === keyText(place.name))
+        || research.evidence.some(original => original.identity?.name && keyText(original.identity.name) === keyText(ev.identity?.name || ""))) return [];
+      return [{ name: ev.identity.name || place.name, address: ev.identity.address || place.address, genre: place.genre,
+        eventStart: ev.eventStart, eventEnd: ev.eventEnd, sourceUrl }];
+    }).filter((item, index, all) => all.findIndex(other => keyText(other.name) === keyText(item.name) && keyText(other.address) === keyText(item.address)) === index).slice(0, 3);
+    return { recommendations, unlocated, verificationIncomplete, retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount, date, replaceIndex };
   };
 }
 export const nearbyService = createNearbyService();

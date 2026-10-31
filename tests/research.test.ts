@@ -50,6 +50,23 @@ function response(entries = [evidence()], urls = [official, unrelated], tasteSig
   ] };
 }
 
+test("nearby source hints are sent for research but cannot authorize an unsearched coordinate source", async () => {
+  const original = globalThis.fetch;
+  const hinted = "https://example.com/discovery-only";
+  const sourceHints = [{ index: 0, urls: [hinted] }];
+  globalThis.fetch = async (_url, init) => {
+    const sent = JSON.parse(JSON.parse(String(init?.body)).input);
+    assert.deepEqual(sent.sourceHints, sourceHints);
+    return Response.json(response([evidence({ locationSourceUrl: hinted })]));
+  };
+  try {
+    const result = await researchPlaces(input, "test", sourceHints);
+    assert.equal(result.evidence[0].status, "verified");
+    assert.equal(result.evidence[0].lat, null);
+    assert.equal(result.evidence[0].lng, null);
+  } finally { globalThis.fetch = original; }
+});
+
 test("actual search URLs support facts and every unused returned source is retained as unmatched", () => {
   const result = parseResearchResponse(response(), input, now);
   assert.equal(result.searchCount, 1);

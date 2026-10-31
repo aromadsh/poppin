@@ -42,6 +42,7 @@ test("nearby discovery only accepts actually searched address and explicit overl
   const raw = (item = lead) => ({ status: "completed", output: [{ type: "web_search_call", status: "completed", action: { type: "search", sources: [{ title: "공식", url }] } }, { type: "message", content: [{ type: "output_text", text: JSON.stringify({ candidates: [item] }) }] }] });
   const query = { area: "성동구", lat: 37.54, lng: 127.05, dateFrom: date, dateTo: date };
   assert.equal(parseNearbyDiscovery(raw(), query).candidates.length, 1);
+  assert.deepEqual(parseNearbyDiscovery(raw(), query).candidates[0].sourceUrls, [url]);
   for (const patch of [{ yearExplicit: false }, { periodSourceUrl: "https://invented.example" }, { eventEnd: "2098-11-05", eventStart: "2098-10-01" }])
     assert.equal(parseNearbyDiscovery(raw({ ...lead, ...patch }), query).candidates.length, 0);
 });
@@ -107,7 +108,7 @@ test("discovery uses a bounded hosted search and never falls back to a different
   globalThis.fetch = async (_url, init) => {
     calls++;
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.max_tool_calls, 2); assert.equal(body.store, false);
+    assert.equal(body.max_tool_calls, 4); assert.equal(body.store, false);
     assert.equal(body.model, "gpt-6.1-sol"); assert.equal(body.tool_choice, "required");
     assert.equal(body.text.format.strict, true);
     return Response.json({}, { status: 404 });
@@ -115,6 +116,26 @@ test("discovery uses a bounded hosted search and never falls back to a different
   try {
     await assert.rejects(discoverNearby({ area: "성수", lat: 37.54, lng: 127.05, dateFrom: date, dateTo: date }, "test-placeholder"), /모델/);
     assert.equal(calls, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test("discovery sends separate broad and category searches with the full address", async () => {
+  const original = globalThis.fetch;
+  let payload: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_url, init) => {
+    payload = JSON.parse(String(init?.body));
+    return Response.json({ status: "completed", output: [
+      { type: "web_search_call", status: "completed", action: { type: "search", sources: [] } },
+      { type: "message", content: [{ type: "output_text", text: '{"candidates":[]}' }] },
+    ] });
+  };
+  try {
+    await discoverNearby({ area: "서울 성동구 성수동", lat: 37.54, lng: 127.05, dateFrom: date, dateTo: date,
+      address: "서울 성동구 연무장길 88", topics: ["뷰티", "스킨케어"], preferences: "스킨케어 좋아요" }, "test");
+    const sent = JSON.parse(payload!.input as string);
+    assert.deepEqual(sent.searchQueries, ["서울 성동구 성수동 뷰티 팝업 2099-10-31", "서울 성동구 성수동 스킨케어 팝업 2099-10-31", "서울 성동구 성수동 2099년 10월 팝업스토어 일정"]);
+    assert.equal(sent.address, "서울 성동구 연무장길 88");
+    assert.equal(sent.preferences, "스킨케어 좋아요");
   } finally { globalThis.fetch = original; }
 });
 
@@ -132,6 +153,94 @@ test("catalog and verification cache reuse avoids paid calls, expires, and rejec
   const invalid = snapshot(); invalid.evidence[0].lat = null;
   await assert.rejects(service(input(), invalid, 0, null, date, "test", now), /위치/);
   assert.equal(searches, 2);
+});
+
+test("nearby discovery receives the selected day, full location and taste context, with separate caches", async () => {
+  const queries: unknown[] = [];
+  const service = createNearbyService({ discover: async query => { queries.push(query); return { candidates: [], searchCount: 1 }; }, research: async () => snapshot() });
+  const request = { ...input(), dateTo: "2099-11-02", preferences: "스킨케어 좋아요" };
+  const research = snapshot();
+  research.tasteSignals = [{ axis: "subcategory", id: "skincare", direction: "like", quote: "스킨케어 좋아요" }];
+  await service(request, research, 0, null, date, "test", now);
+  const query = queries[0] as Record<string, unknown>;
+  assert.equal(query.dateFrom, date);
+  assert.equal(query.dateTo, date);
+  assert.equal(query.area, "서울 성동구");
+  assert.equal(query.address, "서울 성동구 길 0");
+  assert.equal(query.preferences, "스킨케어 좋아요");
+  assert.ok((query.topics as string[]).includes("스킨케어"));
+  assert.ok((query.topics as string[]).includes("뷰티"));
+  await service(request, research, 0, null, "2099-11-01", "test", now);
+  await service({ ...request, preferences: "향수 좋아요" }, research, 0, null, date, "test", now);
+  assert.equal(queries.length, 3);
+});
+
+test("rejected first batches do not hide later nearby candidates and verification is cached", async () => {
+  let checks = 0;
+  const leads = Array.from({ length: 8 }, (_, i) => ({ name: `주변 후보 ${i}`, address: `서울 성동구 새길 ${i}`, genre: "뷰티", classification: ev().classification! }));
+  const service = createNearbyService({ discover: async () => ({ candidates: leads, searchCount: 1 }),
+    research: async request => {
+      checks++;
+      assert.ok(request.places.length <= 3);
+      return { ...snapshot(), evidence: request.places.map((place, index) => ev(index, {
+        lat: place.name === "주변 후보 7" ? 37.541 : 35,
+        identity: { ...ev().identity!, name: place.name, address: place.address },
+      })) };
+    } });
+  const first = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.deepEqual(first.recommendations.map(item => item.place.name), ["주변 후보 7"]);
+  assert.equal(first.checkedCount, 8);
+  assert.equal(first.searchCount, 4);
+  assert.equal(checks, 3);
+  const second = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.equal(second.recommendations.length, 1);
+  assert.equal(second.searchCount, 0);
+  assert.equal(second.cached, true);
+  assert.equal(checks, 3);
+});
+
+test("three unusable schedules do not stop discovery before a later visitable popup", async () => {
+  const leads = Array.from({ length: 4 }, (_, i) => ({ name: `시간 후보 ${i}`, address: `서울 성동구 새길 ${i}`, genre: "뷰티", classification: ev().classification! }));
+  const service = createNearbyService({ discover: async () => ({ candidates: leads, searchCount: 1 }),
+    research: async request => ({ ...snapshot(), evidence: request.places.map((place, index) => ev(index, {
+      identity: { ...ev().identity!, name: place.name, address: place.address },
+      hours: [{ date, open: place.name === "시간 후보 3" ? "11:00" : "20:00", close: "22:00" }],
+    })) }) });
+  const report = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.equal(report.recommendations[0].place.name, "시간 후보 3");
+  assert.equal(report.recommendations[0].status, "ready");
+  assert.equal(report.checkedCount, 4);
+});
+
+test("verified events without coordinates remain visible without claiming a distance or ready itinerary", async () => {
+  const service = createNearbyService({ discover: async () => ({ candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 }),
+    research: async () => ({ ...snapshot(), evidence: [candidate({ lat: null, lng: null }).evidence] }) });
+  const report = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.equal(report.recommendations.length, 0);
+  assert.deepEqual(report.unlocated, [{ name: "새 팝업", address: "서울 성동구 새길 7", genre: "뷰티", eventStart: date, eventEnd: "2099-11-05", sourceUrl: url }]);
+});
+
+test("the selected event cannot reappear as an unlocated candidate under an alias", async () => {
+  const service = createNearbyService({ discover: async () => ({ candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 }),
+    research: async () => ({ ...snapshot(), evidence: [candidate({ lat: null, lng: null, identity: ev().identity }).evidence] }) });
+  const report = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.deepEqual(report.unlocated, []);
+});
+
+test("a later verification failure preserves earlier results and marks the search incomplete", async () => {
+  let checks = 0;
+  const leads = Array.from({ length: 4 }, (_, i) => ({ name: `부분 후보 ${i}`, address: `서울 성동구 새길 ${i}`, genre: "뷰티", classification: ev().classification! }));
+  const service = createNearbyService({ discover: async () => ({ candidates: leads, searchCount: 1 }),
+    research: async request => {
+      if (++checks > 1) throw new Error("upstream unavailable");
+      return { ...snapshot(), evidence: request.places.map((place, index) => ev(index, {
+        lat: index === 0 ? 37.541 : 35, identity: { ...ev().identity!, name: place.name, address: place.address },
+      })) };
+    } });
+  const report = await service(input(), snapshot(), 0, null, date, "test", now);
+  assert.equal(report.recommendations[0].place.name, "부분 후보 0");
+  assert.equal(report.verificationIncomplete, true);
+  assert.equal(report.checkedCount, 3);
 });
 
 test("analysis snapshots are opaque, copied, bounded by expiry and do not accept client evidence", () => {
