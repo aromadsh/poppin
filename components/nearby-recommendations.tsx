@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Input } from "../lib/planner";
 import type { AnalysisResult } from "../lib/analysis-types";
 import type { NearbyRecommendation, NearbyReport } from "../lib/nearby";
+import { readNearbyResponse } from "../lib/nearby-response";
 
 type Item = Omit<NearbyRecommendation, "proposedInput" | "evidence" | "plan"> & { proposalId: string };
 type Report = Omit<NearbyReport, "recommendations"> & { recommendations: Item[] };
@@ -27,10 +28,10 @@ export function NearbyRecommendations({ analysisId, input, disabled, onApply }: 
     const timer = setTimeout(() => controller.abort(), 330_000);
     setBusy(true); setError(""); setReport(null); setSelected([]);
     try {
-      const response = await fetch("/api/nearby", { method: "POST", headers: { "Content-Type": "application/json" },
+      const response = await fetch("/api/nearby", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
         body: JSON.stringify({ analysisId, anchorIndex: anchor, replaceIndex: replace, date }), signal: controller.signal });
-      const data = await response.json() as Report & { error?: string };
-      if (!response.ok) throw new Error(data.error || "주변 팝업 검색을 완료하지 못했어요.");
+      const data = await readNearbyResponse<Report & { error?: string }>(response);
+      if (!response.ok || data.error) throw new Error(data.error || "주변 팝업 검색을 완료하지 못했어요.");
       if (!controller.signal.aborted) setReport(data);
     } catch (error) { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "연결을 확인해 주세요."); else if (request.current === controller) setError("주변 검색이 중단되거나 시간이 초과됐어요. 다시 시도해 주세요."); }
     finally { clearTimeout(timer); if (request.current === controller) setBusy(false); }
@@ -42,7 +43,7 @@ export function NearbyRecommendations({ analysisId, input, disabled, onApply }: 
     setBusy(true); setError("");
     try {
       const response = await fetch("/api/nearby/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ analysisId, proposalIds: selected }), signal: controller.signal });
-      const data = await response.json() as { input: Input; analysis: AnalysisResult; date: string; error?: string };
+      const data = await readNearbyResponse<{ input: Input; analysis: AnalysisResult; date: string; error?: string }>(response);
       if (!response.ok) throw new Error(data.error || "추천을 반영하지 못했어요.");
       if (!controller.signal.aborted) onApply(data.input, data.analysis, data.date);
     } catch (error) { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "다시 시도해 주세요."); else setError("반영 시간이 초과됐어요. 다시 시도해 주세요."); }

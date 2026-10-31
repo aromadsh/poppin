@@ -4,6 +4,30 @@ export function json(value: unknown, status = 200, extra: Record<string, string>
   return Response.json(value, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extra } });
 }
 
+/** Keep the response active while sequential web searches finish behind the gateway. */
+export function streamJson(task: Promise<unknown>) {
+  const encoder = new TextEncoder();
+  let closed = false, heartbeat: ReturnType<typeof setInterval>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (value: unknown) => { if (!closed) controller.enqueue(encoder.encode(JSON.stringify(value) + "\n")); };
+      const finish = (value: unknown) => {
+        clearInterval(heartbeat);
+        if (closed) return;
+        send(value); closed = true; controller.close();
+      };
+      send({ type: "progress" });
+      heartbeat = setInterval(() => send({ type: "progress" }), 10_000);
+      void task.then(data => finish({ type: "result", data }), async error => {
+        const response = error instanceof ResearchError ? researchErrorResponse(error) : json({ error: "주변 팝업을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.", code: "internal_error" }, 500);
+        finish({ type: "error", data: await response.json() });
+      });
+    },
+    cancel() { closed = true; clearInterval(heartbeat); },
+  });
+  return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store, no-transform", "X-Content-Type-Options": "nosniff", "X-Accel-Buffering": "no" } });
+}
+
 /** Keep operator setup details out of production responses, including their error codes. */
 export function researchErrorResponse(error: ResearchError, development = import.meta.env?.DEV === true) {
   const serviceCodes = new Set(["billing_required", "spend_limit", "usage_limit", "upstream_limit", "not_configured", "model_unavailable", "service_unavailable"]);

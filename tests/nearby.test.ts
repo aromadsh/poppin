@@ -396,6 +396,27 @@ test("separate server instances retain shared snapshots until the exact twenty-m
 });
 
 const moduleUrl = (source: string) => "data:text/javascript;base64," + Buffer.from(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64");
+test("주변 검색 API는 긴 검색 완료 전 응답을 시작하고 중복 검색은 공유한다", async () => {
+  const { readNearbyResponse } = await import("../lib/nearby-response");
+  const id = await rememberAnalysis(input(), snapshot());
+  const fake = moduleUrl(`export let calls=0; export let finish; const task=new Promise(resolve=>{finish=resolve}); export async function nearbyService(){calls++; return task}`);
+  const researchUrl = new URL("../lib/research.ts", import.meta.url).href;
+  const guardSource = (await readFile(new URL("../lib/api-guard.ts", import.meta.url), "utf8")).replace('"./research"', JSON.stringify(researchUrl))
+    .replace('typeof process !== "undefined" ? process.env.OPENAI_API_KEY : undefined', '"test-placeholder"');
+  let source = await readFile(new URL("../app/api/nearby/route.ts", import.meta.url), "utf8");
+  source = source.replace('"@/lib/nearby"', JSON.stringify(fake)).replace('"@/lib/api-guard"', JSON.stringify(moduleUrl(guardSource)));
+  for (const name of ["analysis-store", "research"]) source = source.replace(`"@/lib/${name}"`, JSON.stringify(new URL(`../lib/${name}.ts`, import.meta.url).href));
+  source = source.replace('"zod"', JSON.stringify(new URL("../node_modules/zod/index.js", import.meta.url).href));
+  const route = await import(moduleUrl(source));
+  const request = () => new Request("http://localhost/api/nearby", { method: "POST", headers: { Origin: "http://localhost", "Content-Type": "application/json", Accept: "application/x-ndjson" },
+    body: JSON.stringify({ analysisId: id, anchorIndex: 0, replaceIndex: null, date }) });
+  const first = await route.POST(request()), second = await route.POST(request());
+  assert.match(first.headers.get("content-type"), /ndjson/);
+  const service = await import(fake);
+  assert.equal(service.calls, 1);
+  service.finish({ recommendations: [], retrievedAt: now.toISOString() });
+  assert.deepEqual(await readNearbyResponse(first), await readNearbyResponse(second));
+});
 test("nearby endpoint accepts server snapshots only and returns opaque selection IDs", async () => {
   const id = await rememberAnalysis(input(), snapshot());
   const recommendation = rankNearby(input(), snapshot(), 0, null, date, [candidate()], now)[0];
