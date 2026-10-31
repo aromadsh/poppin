@@ -1,6 +1,7 @@
 import { validateInput, planVisits, type Input } from "@/lib/planner";
 import { researchPlaces, ResearchError } from "@/lib/research";
 import { forecastQueues } from "@/lib/forecast";
+import { rememberAnalysis } from "@/lib/analysis-store";
 import { json, digest, apiKey, readJsonBody, sameOrigin, acquireBudget, researchErrorResponse } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ const cache = new Map<string, { expires: number; value: Research }>();
 const inflight = new Map<string, Promise<Research>>();
 function analyze(input: Input, result: Research, cached: boolean) {
   const now = new Date();
-  return json({ ...result, plan: planVisits(input, result.evidence, now, result.tasteSignals), forecasts: forecastQueues(input, result.evidence, now), cached });
+  return json({ ...result, analysisId: rememberAnalysis(input, result), plan: planVisits(input, result.evidence, now, result.tasteSignals), forecasts: forecastQueues(input, result.evidence, now), cached });
 }
 
 export async function POST(request: Request) {
