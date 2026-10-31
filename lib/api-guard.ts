@@ -76,9 +76,9 @@ export function acquireBudget(ip: string, operation: Operation) {
   for (const [key, bucket] of ips) if (now - bucket.start >= 10 * 60_000) ips.delete(key);
   if (now - globalWindow.start >= 60 * 60_000) globalWindow = { start: now, count: 0 };
   const bucket = ips.get(ip) ?? { start: now, total: 0, analyze: 0, lookup: 0 };
-  if (bucket.total >= 8 || bucket[operation] >= (operation === "analyze" ? 3 : 6) || globalWindow.count >= 40)
+  if (bucket.total >= 800 || bucket[operation] >= (operation === "analyze" ? 300 : 600) || globalWindow.count >= 4000)
     throw new ResearchError("rate_limited", "검색·분석 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.", 429);
-  if (active >= 2) throw new ResearchError("busy", "다른 검색·분석을 진행 중입니다. 잠시 후 다시 시도해 주세요.", 429);
+  if (active >= 200) throw new ResearchError("busy", "다른 검색·분석을 진행 중입니다. 잠시 후 다시 시도해 주세요.", 429);
   if (ips.size >= 1000 && !ips.has(ip)) ips.delete(ips.keys().next().value!);
   ips.set(ip, { ...bucket, total: bucket.total + 1, [operation]: bucket[operation] + 1 });
   globalWindow.count++;
