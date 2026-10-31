@@ -14,7 +14,7 @@ export type NearbyRecommendation = {
   proposedInput: Input; plan: DayPlan | null; retrievedAt: string;
 };
 export type NearbyUnlocated = { name: string; address: string; genre: string; eventStart: string; eventEnd: string; sourceUrl: string };
-export type NearbyReport = { recommendations: NearbyRecommendation[]; unlocated: NearbyUnlocated[]; verificationIncomplete?: boolean; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string; replaceIndex: number | null };
+export type NearbyReport = { recommendations: NearbyRecommendation[]; unlocated: NearbyUnlocated[]; anchorCoordinatesMissing?: boolean; verificationIncomplete?: boolean; retrievedAt: string; cached: boolean; searchCount: number; discoveredCount: number; checkedCount: number; date: string; replaceIndex: number | null };
 const keyText = (s: string) => s.normalize("NFKC").toLowerCase().replace(/팝업스토어|팝업|[^\p{L}\p{N}]/gu, "");
 export function sameEvent(a: Input["places"][number], b: Input["places"][number]) {
   return keyText(a.name) === keyText(b.name) && keyText(a.address) === keyText(b.address);
@@ -55,7 +55,8 @@ export function validateNearbySelection(input: Input, research: ResearchSnapshot
     throw new ResearchError("invalid_input", "기준 장소와 예약한 장소를 제외하고 교체할 장소를 선택해 주세요.", 400);
   if (input.places.length < 3 && replaceIndex !== null) throw new ResearchError("invalid_input", "현재 일정에는 장소를 추가할 수 있습니다.", 400);
   const anchor = research.evidence.find(ev => ev.index === anchorIndex);
-  if (!anchor || !sourcedCoordinates(anchor) || anchor.identity && anchor.identity.locationStatus !== "confirmed")
+  if (!anchor || !anchor.matched || anchor.status !== "verified" || !anchor.sources.some(s => s.matched)
+    || anchor.identity?.locationStatus !== "confirmed" || !anchor.identity.address?.trim())
     throw new ResearchError("anchor_unverified", "기준 장소의 행사와 위치를 먼저 확인해야 주변을 추천할 수 있어요.", 400);
   return anchor;
 }
@@ -63,6 +64,7 @@ export function validateNearbySelection(input: Input, research: ResearchSnapshot
 export function rankNearby(input: Input, research: ResearchSnapshot, anchorIndex: number, replaceIndex: number | null, date: string,
   candidates: { place: Input["places"][number]; evidence: PlaceEvidence; retrievedAt: string }[], now: Date): NearbyRecommendation[] {
   const anchor = validateNearbySelection(input, research, anchorIndex, replaceIndex, date, now);
+  if (!sourcedCoordinates(anchor)) return [];
   const signals = research.tasteSignals ?? [];
   const retained = input.places.map((_, i) => i).filter(i => i !== replaceIndex);
   const baseInput = { ...input, places: retained.map(i => input.places[i]) };
@@ -131,7 +133,8 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
       ...anchorTopic.experienceTags.map(id => tasteLabel({ axis: "experience", id })),
     ])].filter(label => label !== "미분류");
     const query: DiscoveryQuery = { area, address, anchorName: anchor.identity?.name || input.places[anchorIndex].name,
-      lat: anchor.lat!, lng: anchor.lng!, dateFrom: date, dateTo: date, topics, preferences: input.preferences,
+      lat: sourcedCoordinates(anchor) ? anchor.lat : null, lng: sourcedCoordinates(anchor) ? anchor.lng : null,
+      dateFrom: date, dateTo: date, topics, preferences: input.preferences,
       excludedNames: input.places.map(p => p.name) };
     const key = JSON.stringify(query);
     for (const cache of [catalogs, verified]) for (const [id, item] of cache) if (item.expires <= now.getTime()) cache.delete(id);
@@ -187,13 +190,13 @@ export function createNearbyService(deps: Dependencies = { discover: discoverNea
     const unlocated = candidates.flatMap(({ place, evidence: ev }): NearbyUnlocated[] => {
       const sourceUrl = ev.sources.find(s => s.matched && ev.identity?.sourceUrls.includes(s.url))?.url;
       if (!ev.matched || ev.status !== "verified" || ev.identity?.locationStatus !== "confirmed" || !sourceUrl
-        || ev.lat != null && ev.lng != null || !ev.eventStart || !ev.eventEnd || date < ev.eventStart || date > ev.eventEnd
+        || sourcedCoordinates(anchor) && sourcedCoordinates(ev) || !ev.eventStart || !ev.eventEnd || date < ev.eventStart || date > ev.eventEnd
         || input.places.some(p => sameEvent(p, place) || keyText(p.name) === keyText(place.name))
         || research.evidence.some(original => original.identity?.name && keyText(original.identity.name) === keyText(ev.identity?.name || ""))) return [];
       return [{ name: ev.identity.name || place.name, address: ev.identity.address || place.address, genre: place.genre,
         eventStart: ev.eventStart, eventEnd: ev.eventEnd, sourceUrl }];
     }).filter((item, index, all) => all.findIndex(other => keyText(other.name) === keyText(item.name) && keyText(other.address) === keyText(item.address)) === index).slice(0, 3);
-    return { recommendations, unlocated, verificationIncomplete, retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount, date, replaceIndex };
+    return { recommendations, unlocated, anchorCoordinatesMissing: !sourcedCoordinates(anchor), verificationIncomplete, retrievedAt, cached, searchCount, discoveredCount: catalog.value.candidates.length, checkedCount, date, replaceIndex };
   };
 }
 export const nearbyService = createNearbyService();

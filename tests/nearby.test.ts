@@ -150,9 +150,36 @@ test("catalog and verification cache reuse avoids paid calls, expires, and rejec
   assert.equal(searches, 1); assert.equal(checks, 1);
   await service(input(), snapshot(), 0, null, date, "test", new Date(now.getTime() + 21 * 60_000));
   assert.equal(searches, 2); assert.equal(checks, 2);
-  const invalid = snapshot(); invalid.evidence[0].lat = null;
+  const invalid = snapshot(); invalid.evidence[0].matched = false;
   await assert.rejects(service(input(), invalid, 0, null, date, "test", now), /위치/);
   assert.equal(searches, 2);
+});
+
+test("confirmed anchor addresses without coordinates can discover events without inventing distances or schedules", async () => {
+  const research = snapshot(); research.evidence[0].lat = null; research.evidence[0].lng = null;
+  let discoveries = 0;
+  const service = createNearbyService({ discover: async query => {
+    discoveries++;
+    assert.equal(query.address, "서울 성동구 길 0");
+    assert.equal(query.lat, null); assert.equal(query.lng, null);
+    return { candidates: [{ ...candidate().place, classification: ev().classification! }], searchCount: 1 };
+  }, research: async () => ({ ...snapshot(), evidence: [candidate().evidence] }) });
+  const report = await service(input(), research, 0, null, date, "test", now);
+  assert.equal(discoveries, 1);
+  assert.equal(report.anchorCoordinatesMissing, true);
+  assert.deepEqual(report.recommendations, []);
+  assert.equal(report.unlocated[0].name, "새 팝업");
+});
+
+test("unverified or ambiguous anchors still reject discovery even with coordinates", async () => {
+  let discoveries = 0;
+  const service = createNearbyService({ discover: async () => { discoveries++; return { candidates: [], searchCount: 0 }; }, research: async () => snapshot() });
+  for (const patch of [{ matched: false }, { status: "unconfirmed" as const }, { sources: [] },
+    { identity: { ...ev().identity!, locationStatus: "ambiguous" as const } }]) {
+    const research = snapshot(); research.evidence[0] = ev(0, patch);
+    await assert.rejects(service(input(), research, 0, null, date, "test", now), /위치/);
+  }
+  assert.equal(discoveries, 0);
 });
 
 test("nearby discovery receives the selected day, full location and taste context, with separate caches", async () => {

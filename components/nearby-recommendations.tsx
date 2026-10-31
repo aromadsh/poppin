@@ -49,7 +49,7 @@ export function NearbyRecommendations({ analysisId, input, date: initialDate, di
   }
   return <section className="nearby-section" aria-label="취향에 맞는 주변 팝업" aria-busy={busy}>
     <h3>함께 들르기 좋은 주변 팝업</h3>
-    <p>분석한 장소 주변 약 2km에서 취향에 맞는 행사를 찾아요. 기준 장소와 예약 시간은 유지합니다.</p>
+    <p>기준 장소의 주소를 바탕으로 취향에 맞는 행사를 찾아요. 좌표가 확인되면 2km 이내인지 비교하며, 기준 장소와 예약 시간은 유지합니다.</p>
     <fieldset disabled={busy || disabled} className="nearby-controls">
       <label>기준 장소<select value={anchor} onChange={e => { setAnchor(Number(e.target.value)); setReplace(null); setReport(null); }}>{input.places.map((p, i) => <option key={i} value={i}>{p.name}</option>)}</select></label>
       <label>방문 날짜<input type="date" min={input.dateFrom} max={input.dateTo} value={date} onChange={e => { setDate(e.target.value); setReport(null); }}/></label>
@@ -59,6 +59,7 @@ export function NearbyRecommendations({ analysisId, input, date: initialDate, di
     <p className="input-note">{disabled ? "입력 조건이 바뀌었거나 저장된 분석 정보가 없어요. 방문 일정을 다시 분석해 주세요." : needsReplacement ? "최대 3곳 · 기준 장소와 예약한 장소는 교체하지 않습니다." : "원래 선택한 장소를 모두 유지하고 한 곳을 추가합니다."} 주변 검색은 별도 API 비용이 발생할 수 있으며, 같은 검색 결과는 20분간 재사용합니다.</p>
     {error && <p role="alert">{error}</p>}
     {report && <><p className="input-note">{new Date(report.retrievedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })} 확인 · {report.cached ? "저장된 검색 정보" : "새로 확인한 검색 정보"} · 방문 기간의 운영 정보 기준</p>
+      {report.anchorCoordinatesMissing && <p role="status">기준 장소의 지도 좌표가 확인되지 않아 주소를 기준으로 찾았어요. 거리와 이동 시간은 지도에서 확인해 주세요.</p>}
       {report.verificationIncomplete && <p role="status">일부 후보의 추가 확인을 마치지 못했어요. 지금까지 확인한 결과를 먼저 보여드려요.</p>}
       {!report.recommendations.length ? report.unlocated?.length ? null : <p role="status">위치와 행사 기간을 확인한 주변 후보를 찾지 못했어요. 주변에 행사가 없다는 뜻은 아닙니다.</p> : <div className="nearby-grid">{report.recommendations.map(item => <article className="nearby-card" key={item.id}>
         <span className="status-badge">{labels[item.status]}</span><h4>{item.place.name}</h4><p>{item.place.genre}</p>
