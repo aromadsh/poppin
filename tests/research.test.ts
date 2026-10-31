@@ -296,7 +296,7 @@ test("one bounded API request uses the approved model and mandatory hosted searc
     assert.equal(body.reasoning.effort, "low");
     assert.equal(body.store, false);
     assert.equal(body.max_tool_calls, 4);
-    assert.equal(body.max_output_tokens, 6000);
+    assert.equal(body.max_output_tokens, 9000);
     assert.equal(body.tool_choice, "required");
     assert.equal(body.tools[0].type, "web_search");
     assert.deepEqual(body.include, ["web_search_call.action.sources"]);
@@ -402,4 +402,19 @@ test("취향 추출은 입력 문구에 근거하고 행사 분류와 독립적�
   assert.deepEqual(result.tasteSignals, signals.slice(0, 2));
   assert.equal(result.evidence[0].classification?.category, "unclassified");
   assert.deepEqual(parseResearchResponse(response(), request, now).tasteSignals, []);
+});
+
+test("AI prediction is kept even without matched evidence, labeled with the model and stripped of links and out-of-range picks", () => {
+  const prediction = { likelyStart: "2026-10-01", likelyEnd: "2026-09-01", hours: { open: "11:00", close: "10:00" }, admission: "reservation",
+    crowd: [{ day: "weekday", hour: 10, level: "low", waitMin: 0, waitMax: 10 }, { day: "weekday", hour: 10, level: "high", waitMin: 0, waitMax: 10 }, { day: "weekend", hour: 25, level: "high", waitMin: 0, waitMax: 10 }, { day: "weekend", hour: 14, level: "high", waitMin: 30, waitMax: 20 }],
+    busyDates: [{ date: "2026-10-31", level: "very_high", reason: "주말 https://evil.example/x 방문" }, { date: "2026-12-25", level: "high", reason: "범위 밖" }],
+    bestVisits: [{ date: "2026-10-30", time: "10:00", reason: "평일 오전" }, { date: "2026-10-30", time: "오전", reason: "형식 오류" }],
+    rationale: "추정 근거입니다.", confidence: "low" };
+  const parsed = parseResearchResponse(response([evidence({ matched: false, status: "not_found", prediction })]), input, now).evidence[0];
+  assert.equal(parsed.matched, false);
+  assert.deepEqual(parsed.prediction, { model: MODEL, likelyStart: "2026-10-01", likelyEnd: null, hours: null, admission: "reservation",
+    crowd: [{ day: "weekday", hour: 10, level: "low", waitMin: 0, waitMax: 10 }], busyDates: [{ date: "2026-10-31", level: "very_high", reason: "주말 방문" }],
+    bestVisits: [{ date: "2026-10-30", time: "10:00", reason: "평일 오전" }], rationale: "추정 근거입니다.", confidence: "low" });
+  // A prediction never fills sourced fields.
+  assert.deepEqual([parsed.eventStart, parsed.hours, parsed.queue], [null, [], []]);
 });
