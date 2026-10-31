@@ -4,11 +4,14 @@ import { useEffect, useId, useRef, useState } from "react";
 
 /** Clamp descriptive copy while leaving the full text available on demand. */
 export function ExpandableText({ text, label }: { text: string; label: string }) {
+  return <ExpandableTextContent key={text} text={text} label={label}/>;
+}
+
+function ExpandableTextContent({ text, label }: { text: string; label: string }) {
   const id = useId();
   const paragraph = useRef<HTMLParagraphElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
-  useEffect(() => { setExpanded(false); }, [text]);
   useEffect(() => {
     if (expanded || !paragraph.current) return;
     const node = paragraph.current;
