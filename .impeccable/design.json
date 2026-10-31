@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-30T00:00:00Z",
+  "title": "Design System: PopPin",
+  "extensions": {
+    "colorMeta": {
+      "violet": { "role": "primary", "displayName": "Pin Violet", "canonical": "#7252ca", "tonalRamp": ["#2a1a52", "#3f2a7a", "#5e3cb5", "#7252ca", "#a78ae9", "#cbbcf0", "#e4daf5", "#f5f0fb"] },
+      "lavender-wash": { "role": "secondary", "displayName": "Lavender Wash", "canonical": "#eee8fa" },
+      "lavender-panel": { "role": "secondary", "displayName": "Lavender Panel", "canonical": "#f0ecf8" },
+      "paper": { "role": "neutral", "displayName": "Weekend Paper", "canonical": "#faf9f5", "tonalRamp": ["#27262b", "#4d4657", "#74717a", "#a19ba6", "#d8d3de", "#e6e3dc", "#f0ede6", "#faf9f5"] },
+      "stone-card": { "role": "neutral", "displayName": "Stone Card", "canonical": "#f0ede6" },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#27262b" }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Hero headline only." },
+      "headline": { "displayName": "Headline", "purpose": "Section h2s." },
+      "title": { "displayName": "Title", "purpose": "Card and form-part headings with an inline violet icon." },
+      "body": { "displayName": "Body", "purpose": "Default text; descriptions at 14px/24px muted." },
+      "label": { "displayName": "Eyebrow", "purpose": "Short uppercase English taglines above headings." }
+    },
+    "shadows": [
+      { "name": "product-lift", "value": "0 24px 64px #3b304311", "purpose": "Tilted hero product card." },
+      { "name": "floating-tag", "value": "0 8px 32px #33234413", "purpose": "Floating labels over the product card." },
+      { "name": "cta-glow", "value": "0 8px 24px #7252ca20", "purpose": "Hero primary button." },
+      { "name": "active-tab", "value": "0 2px 8px #31284208", "purpose": "Selected result tab." }
+    ],
+    "motion": [
+      { "name": "curve", "value": "cubic-bezier(.22,1,.36,1)", "purpose": "All transitions: hover, reveal, menu." },
+      { "name": "reveal", "value": "opacity and translateY(32px), .7s, curve", "purpose": "Sections fade up on scroll; off under reduced motion." }
+    ],
+    "breakpoints": [
+      { "name": "mobile", "value": "760px" },
+      { "name": "tablet", "value": "1050px" },
+      { "name": "wide", "value": "1440px" }
+    ]
+  },
+  "components": [
+    { "name": "Primary Button", "kind": "button", "refersTo": "button-primary", "description": "Main action: find my visit timing.", "html": "<button class=\"ds-btn-primary\">내 방문 타이밍 찾기 <svg width=\"20\" height=\"20\" viewBox=\"0 0 256 256\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"16\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M40 128h176M144 56l72 72-72 72\"/></svg></button>", "css": ".ds-btn-primary{display:inline-flex;align-items:center;gap:12px;min-height:56px;padding:8px 16px;border:0;border-radius:12px;background:#7252ca;color:#fff;font:600 16px Geist,'Malgun Gothic',sans-serif;box-shadow:0 8px 24px #7252ca20;cursor:pointer;transition:transform .5s cubic-bezier(.22,1,.36,1),background-color .3s cubic-bezier(.22,1,.36,1)}.ds-btn-primary:hover{background:#5e3cb5;transform:translateY(-2px)}.ds-btn-primary:active{transform:scale(.98)}.ds-btn-primary:focus-visible{outline:3px solid #a78ae9;outline-offset:4px}" },
+    { "name": "Secondary Button", "kind": "button", "refersTo": "button-secondary", "description": "Quiet action such as re-search.", "html": "<button class=\"ds-btn-secondary\">정보 새로 검색</button>", "css": ".ds-btn-secondary{display:inline-flex;align-items:center;gap:12px;min-height:48px;padding:8px 12px;border:1px solid #e6e3dc;border-radius:12px;background:#fff;color:#27262b;font:600 14px Geist,'Malgun Gothic',sans-serif;cursor:pointer;transition:background-color .3s cubic-bezier(.22,1,.36,1)}.ds-btn-secondary:hover{background:#eee8fa}.ds-btn-secondary:focus-visible{outline:3px solid #a78ae9;outline-offset:4px}" },
+    { "name": "Nav Call-to-action", "kind": "nav", "refersTo": "nav-cta", "description": "Ink pill in the header.", "html": "<a class=\"ds-nav-cta\" href=\"#\">계획 시작하기</a>", "css": ".ds-nav-cta{display:inline-flex;align-items:center;gap:12px;padding:8px 12px;border-radius:9999px;background:#27262b;color:#fff;font:600 14px Geist,'Malgun Gothic',sans-serif;text-decoration:none;transition:background-color .3s cubic-bezier(.22,1,.36,1)}.ds-nav-cta:hover{background:#7252ca}.ds-nav-cta:focus-visible{outline:3px solid #a78ae9;outline-offset:4px}" },
+    { "name": "Text Field", "kind": "input", "refersTo": "input", "description": "Form input with label and required marker.", "html": "<label class=\"ds-field\"><span>팝업명 <small>필수</small></span><input placeholder=\"정확한 팝업 행사명\"></label>", "css": ".ds-field{display:flex;flex-direction:column;gap:8px;font:500 14px Geist,'Malgun Gothic',sans-serif;color:#27262b}.ds-field small{font-size:12px;font-weight:400;color:#776e80}.ds-field input{border:1px solid #e5e0e8;background:#fdfcfb;border-radius:8px;padding:12px;font:400 14px/20px Geist,'Malgun Gothic',sans-serif;color:#27262b;transition:border-color .3s}.ds-field input:hover{border-color:#baabd5}.ds-field input:focus-visible{outline:3px solid #a78ae9;outline-offset:2px}" },
+    { "name": "Pill Chip", "kind": "chip", "refersTo": "pill-chip", "description": "Hero kicker with a violet dot.", "html": "<span class=\"ds-pill\"><i></i> 팝업을 즐기는, 조금 더 똑똑한 방법</span>", "css": ".ds-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #e2d8f0;border-radius:9999px;background:#f5f0fb;color:#655c74;font:500 12px Geist,'Malgun Gothic',sans-serif}.ds-pill i{width:6px;height:6px;border-radius:100%;background:#7252ca}" },
+    { "name": "Tool Card", "kind": "card", "refersTo": "card", "description": "Flat white card for form and results.", "html": "<article class=\"ds-card\"><span>WAITING SIGNALS</span><h3>성수 팝업</h3><p>시간대별 대기 근거가 부족해요.</p></article>", "css": ".ds-card{padding:32px;border:1px solid #e6e3dc;border-radius:24px;background:#fff;font-family:Geist,'Malgun Gothic',sans-serif;color:#27262b}.ds-card span{font-size:12px;font-weight:600;letter-spacing:1.5px;color:#7252ca}.ds-card h3{margin:12px 0 0;font-size:24px;font-weight:600}.ds-card p{margin:16px 0 0;font-size:14px;line-height:24px;color:#8a7d97}" },
+    { "name": "Summary Card", "kind": "card", "refersTo": "summary-card", "description": "Violet day-at-a-glance card.", "html": "<div class=\"ds-summary\"><span>YOUR DAY, AT A GLANCE</span><div><em>전체 일정</em><b>135<small> 분</small></b></div></div>", "css": ".ds-summary{padding:32px;border-radius:24px;background:#7252ca;color:#fff;font-family:Geist,'Malgun Gothic',sans-serif}.ds-summary span{font-size:12px;font-weight:600;letter-spacing:1px;color:#d5c5f2}.ds-summary div{display:flex;justify-content:space-between;align-items:center;margin-top:32px}.ds-summary em{font-style:normal;font-size:14px;color:#dbcef0}.ds-summary b{font-size:30px;font-weight:500}.ds-summary small{font-size:14px;font-weight:400;color:#dacbee}" }
+  ],
+  "narrative": {
+    "northStar": "The Weekend Itinerary Card",
+    "overview": "PopPin looks like a day plan someone made for a friend: a warm off-white page, one violet accent that marks every pin and step, and soft rounded cards that sit slightly askew as if set down on a table. The tone is light and inviting at the top of the page, then turns calm and documentary where evidence appears. Decoration is small and specific: a tilted product card, a floating tag, a rotated stamp, numbered steps.\n\nDensity is comfortable. Sections breathe at 96px, cards pad at 32px, and type stays in one family (Geist with Korean system fallbacks). Violet carries meaning, never mood: it marks pins, numbers, actions, and confirmed state. Muted violet-greys carry everything secondary.\n\nHonesty is visual too. Unknowns get their own calm states (dashed borders, soft lavender panels, plain sentences) instead of disappearing or being styled as errors.",
+    "keyCharacteristics": ["Warm paper ground with white and stone cards.", "A single violet accent with lavender tints for washes and panels.", "One sans family, semibold headings with tight negative tracking.", "Soft radii from 8px to 24px, pills for chips and nav.", "Shadows are rare, diffuse, and violet-tinted.", "Small playful rotations on showcase pieces only."],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Violet is the only saturated hue on the page. Status colors are muted and appear only on badges and alerts.", "section": "colors" },
+      { "name": "The Meaning Not Mood Rule", "body": "Violet marks something the visitor can act on or a confirmed step. Do not use it as a decorative background wash.", "section": "colors" },
+      { "name": "The English Eyebrow Rule", "body": "English appears only as short uppercase eyebrows and stamps. Everything a visitor must read to act is Korean.", "section": "typography" },
+      { "name": "The Flat Workspace Rule", "body": "The planner form, results, and evidence cards stay flat with hairline borders. Lift belongs to the showcase, not the tool.", "section": "elevation" }
+    ],
+    "dos": ["Do keep violet (#7252ca) as the only saturated hue, used for actions, pins, numbers, and confirmed state.", "Do use the paper, stone, white, and lavender layers for depth before reaching for a shadow.", "Do pair every number or prediction with a label saying whether it is observed, estimated, or unknown.", "Do keep showcase rotations small (1 to 8 degrees) and limited to the hero and tagline stamp.", "Do honor reduced motion: reveals and rotations switch off under prefers-reduced-motion."],
+    "donts": ["Don't introduce a second accent hue or a new font family without a redesign decision.", "Don't style unknowns as errors. Red-orange is reserved for analysis failure.", "Don't add shadows or tilt to the planner form, results, or evidence cards.", "Don't put actionable instructions in English."]
+  }
+}

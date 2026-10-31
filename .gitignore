@@ -46,3 +46,6 @@ yarn-error.log*
 
 !.env.example
 
+# Impeccable live-mode session state (keep the project config)
+/.impeccable/live/*
+!/.impeccable/live/config.json
