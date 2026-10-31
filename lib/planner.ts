@@ -39,6 +39,22 @@ export type PlaceEvidence = {
   summary: string;
   queue: { date: string; time: string; min: number; max: number; sourceUrl: string; kind: "observed" | "estimate" }[];
   sources: { title: string; url: string; publishedAt: string | null; matched: boolean; note: string }[];
+  /** The AI model's own rough prediction. Never a sourced fact; used only where sources are missing. */
+  prediction?: AiPrediction;
+};
+
+export type CrowdLevel = "low" | "medium" | "high" | "very_high";
+export type AiPrediction = {
+  model: string;
+  likelyStart: string | null;
+  likelyEnd: string | null;
+  hours: { open: string; close: string } | null;
+  admission: "walk_in" | "reservation" | "mixed" | "unknown";
+  crowd: { day: "weekday" | "weekend"; hour: number; level: CrowdLevel; waitMin: number; waitMax: number }[];
+  busyDates: { date: string; level: CrowdLevel; reason: string }[];
+  bestVisits: { date: string; time: string; reason: string }[];
+  rationale: string;
+  confidence: "low" | "medium";
 };
 
 export type Stop = {
@@ -51,9 +67,11 @@ export type Stop = {
   waitMin: number;
   waitMax: number;
   waitKnown: boolean;
-  waitKind?: "observed" | "forecast" | "unknown";
+  waitKind?: "observed" | "forecast" | "ai" | "unknown";
   stayMinutes: number;
   condition?: string;
+  crowdLevel?: CrowdLevel;
+  aiPredicted?: true;
 };
 export type DayPlan = {
   date: string;
@@ -67,6 +85,7 @@ export type DayPlan = {
   rankingScore?: number;
   complete: boolean;
   conditional?: true;
+  aiPredicted?: true;
 };
 export type ReservationCandidate = {
   index: number;
@@ -77,7 +96,7 @@ export type ReservationCandidate = {
   sourceUrl: string | null;
   windows: { date: string; from: string; to: string; lastEntry: string | null }[];
 };
-export type PlanResult = { taste?: TasteReport; days: DayPlan[]; conditionalDays: DayPlan[]; reservationCandidates: ReservationCandidate[]; excluded: { index: number; reason: string }[]; notes: string[] };
+export type PlanResult = { taste?: TasteReport; days: DayPlan[]; conditionalDays: DayPlan[]; aiDays: DayPlan[]; reservationCandidates: ReservationCandidate[]; excluded: { index: number; reason: string }[]; notes: string[] };
 
 const DAY = 86_400_000;
 function seoulNow(now: Date) {
@@ -196,20 +215,39 @@ function walkingMinutes(a: PlaceEvidence, b: PlaceEvidence): number {
   const km = 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
   return Math.ceil(km * 1.3 / 4 * 60);
 }
+const LEVELS: CrowdLevel[] = ["low", "medium", "high", "very_high"];
+const AVOID_CROWDS = /붐비|붐빔|분비|혼잡|북적|한산|여유롭|사람.{0,3}(많|적|없)|웨이팅|줄.{0,2}(서|짧)|대기/;
+function weekend(date: string) { return [0, 6].includes(new Date(date + "T00:00:00Z").getUTCDay()); }
+/** The AI's crowd prediction for an arrival: nearest hour (±1h) of the same weekday/weekend type, raised on its busy dates. */
+export function aiCrowdAt(ev: PlaceEvidence, date: string, arrival: number) {
+  const prediction = ev.prediction;
+  if (!prediction || !validDate(date) || !Number.isFinite(arrival)) return null;
+  const hour = Math.floor(arrival / 60);
+  const slots = prediction.crowd.filter((slot) => slot.day === (weekend(date) ? "weekend" : "weekday"));
+  if (!slots.length) return null;
+  const nearest = Math.min(...slots.map((slot) => Math.abs(slot.hour - hour)));
+  if (nearest > 1) return null;
+  const slot = slots.find((s) => Math.abs(s.hour - hour) === nearest)!;
+  const busy = prediction.busyDates.find((d) => d.date === date);
+  const raise = busy ? Math.max(0, LEVELS.indexOf(busy.level) - LEVELS.indexOf(slot.level)) : 0;
+  return { level: LEVELS[LEVELS.indexOf(slot.level) + raise], min: Math.round(slot.waitMin * (1 + raise * 0.5)), max: Math.round(slot.waitMax * (1 + raise * 0.5)) };
+}
 function waitAt(ev: PlaceEvidence, date: string, arrival: number, forecasts: QueueForecast[]) {
   const urls = new Set(ev.sources.filter((s) => s.matched).map((s) => s.url));
   const observed = (Array.isArray(ev.queue) ? ev.queue : []).filter((q) => q.kind === "observed" && q.date === date && Number.isFinite(minutes(q.time)) && Math.abs(minutes(q.time) - arrival) <= 60 && Number.isFinite(q.min) && Number.isFinite(q.max) && q.min >= 0 && q.max >= q.min && q.max <= 720 && urls.has(q.sourceUrl));
   const predicted = forecasts.filter((q) => q.index === ev.index && q.date === date && Math.abs(minutes(q.time) - arrival) <= 60);
   const available = observed.length ? observed : predicted;
-  if (!available.length) return { min: 0, max: 30, known: false, kind: "unknown" as const };
+  const ai = aiCrowdAt(ev, date, arrival);
+  const crowd = ai ? { crowdLevel: ai.level } : {};
+  if (!available.length) return ai ? { min: ai.min, max: ai.max, known: true, kind: "ai" as const, ...crowd } : { min: 0, max: 30, known: false, kind: "unknown" as const };
   const nearest = Math.min(...available.map((q) => Math.abs(minutes(q.time) - arrival)));
   const points = available.filter((q) => Math.abs(minutes(q.time) - arrival) === nearest);
-  return { min: Math.floor(Math.min(...points.map((q) => q.min))), max: Math.ceil(Math.max(...points.map((q) => q.max))), known: true, kind: observed.length ? "observed" as const : "forecast" as const };
+  return { min: Math.floor(Math.min(...points.map((q) => q.min))), max: Math.ceil(Math.max(...points.map((q) => q.max))), known: true, kind: observed.length ? "observed" as const : "forecast" as const, ...crowd };
 }
 function routes(indices: number[]): number[][] {
   return indices.flatMap((index) => [[index], ...routes(indices.filter((i) => i !== index)).map((rest) => [index, ...rest])]);
 }
-function schedule(input: Input, evidence: Map<number, PlaceEvidence>, forecasts: QueueForecast[], route: number[], date: string, start: number, conditions: Map<number, string>): DayPlan | null {
+function schedule(input: Input, evidence: Map<number, PlaceEvidence>, forecasts: QueueForecast[], route: number[], date: string, start: number, conditions: Map<number, string>, aiFilled: Set<number> = new Set()): DayPlan | null {
   if (route.length > 1 && route.some((index) => !coordinates(evidence.get(index)!))) return null;
   let cursor = start;
   const stops: Stop[] = [];
@@ -230,7 +268,7 @@ function schedule(input: Input, evidence: Map<number, PlaceEvidence>, forecasts:
       const lastEntry = hour.lastEntry ?? ev.admission?.lastEntry;
       const entryAllowed = lastEntry == null || (Number.isFinite(minutes(lastEntry, true)) && arrival + wait.max <= minutes(lastEntry, true));
       if (entryAllowed && departure <= Math.min(minutes(hour.close, true), minutes(input.timeTo))) {
-        stop = { index, name: place.name, address: place.address, arrival: clock(arrival), departure: clock(departure), travelMinutes: travel, waitMin: wait.min, waitMax: wait.max, waitKnown: wait.known, waitKind: wait.kind, stayMinutes: place.stayMinutes, ...(conditions.has(index) ? { condition: conditions.get(index)! } : {}) };
+        stop = { index, name: place.name, address: place.address, arrival: clock(arrival), departure: clock(departure), travelMinutes: travel, waitMin: wait.min, waitMax: wait.max, waitKnown: wait.known, waitKind: wait.kind, stayMinutes: place.stayMinutes, ...(conditions.has(index) ? { condition: conditions.get(index)! } : {}), ...("crowdLevel" in wait && wait.crowdLevel ? { crowdLevel: wait.crowdLevel } : {}), ...(aiFilled.has(index) ? { aiPredicted: true as const } : {}) };
         cursor = departure;
         break;
       }
@@ -243,8 +281,42 @@ function schedule(input: Input, evidence: Map<number, PlaceEvidence>, forecasts:
   const totalWaitMin = stops.reduce((sum, stop) => sum + stop.waitMin, 0);
   const totalWaitMax = stops.reduce((sum, stop) => sum + stop.waitMax, 0);
   // One unknown wait costs more than any time saving within a day; visit count still dominates.
-  const score = stops.length * 100_000 - totalMinutes - totalTravelMinutes * 2 - totalWaitMax * 2 - stops.filter((stop) => !stop.waitKnown).length * 5000 - stops.filter(stop => stop.condition).length * 10_000;
-  return { date, stops, totalMinutes, totalTravelMinutes, totalWaitMin, totalWaitMax, score, complete: stops.length === input.places.length, ...(stops.some(stop => stop.condition) ? { conditional: true as const } : {}) };
+  // AI crowd levels and the AI's own best visit times only reorder plans; they never make an impossible visit possible.
+  const crowdCost = stops.reduce((sum, stop) => sum + (stop.crowdLevel ? LEVELS.indexOf(stop.crowdLevel) : 0), 0) * (AVOID_CROWDS.test(input.preferences) ? 4000 : 800);
+  const aiPick = stops.filter((stop) => evidence.get(stop.index)!.prediction?.bestVisits.some((v) => v.date === date && Math.abs(minutes(v.time) - minutes(stop.arrival)) <= 60)).length * 2000;
+  const score = stops.length * 100_000 - totalMinutes - totalTravelMinutes * 2 - totalWaitMax * 2 - stops.filter((stop) => !stop.waitKnown).length * 5000 - stops.filter((stop) => stop.waitKind === "ai").length * 1500 - crowdCost + aiPick - stops.filter(stop => stop.condition).length * 10_000;
+  return { date, stops, totalMinutes, totalTravelMinutes, totalWaitMin, totalWaitMax, score, complete: stops.length === input.places.length, ...(stops.some(stop => stop.condition) ? { conditional: true as const } : {}), ...(stops.some(stop => stop.aiPredicted) ? { aiPredicted: true as const } : {}) };
+}
+
+/** Fills only the facts sources did not confirm with the AI's rough prediction. A sourced past event is never revived. */
+function aiFill(ev: PlaceEvidence | undefined, input: Input): { ev: PlaceEvidence; condition: string } | null {
+  const p = ev?.prediction;
+  if (!ev || !p || ev.status === "past") return null;
+  const guessed: string[] = [];
+  let start = input.dateFrom, end = input.dateTo;
+  if (validDate(ev.eventStart) && validDate(ev.eventEnd)) { start = ev.eventStart; end = ev.eventEnd; }
+  else {
+    guessed.push("행사 기간");
+    if (validDate(p.likelyStart)) start = p.likelyStart;
+    if (validDate(p.likelyEnd)) end = p.likelyEnd;
+  }
+  if (end < start || end < input.dateFrom || start > input.dateTo) return null;
+  const hours: PlaceEvidence["hours"] = [];
+  let guessedHours = false;
+  for (let stamp = Date.parse(input.dateFrom); stamp <= Date.parse(input.dateTo); stamp += DAY) {
+    const date = new Date(stamp).toISOString().slice(0, 10);
+    if (date < start || date > end) continue;
+    const listed = ev.hours.filter((h) => h.date === date && Number.isFinite(minutes(h.open)) && minutes(h.close, true) > minutes(h.open));
+    if (listed.length) { hours.push(...listed); continue; }
+    guessedHours = true;
+    hours.push({ date, open: p.hours?.open ?? input.timeFrom, close: p.hours?.close ?? input.timeTo, lastEntry: null });
+  }
+  if (!hours.length) return null;
+  if (guessedHours) guessed.push(p.hours ? "영업시간" : "영업시간(방문 가능 시간으로 가정)");
+  if (!ev.matched) guessed.push("행사 장소 일치");
+  const admission = { walk_in: "현장 입장 가능", reservation: "사전 예약 필요", mixed: "예약·현장 입장 모두 가능", unknown: "알 수 없음" }[p.admission];
+  const condition = `AI 예측(${p.model}, 신뢰도 ${p.confidence === "medium" ? "보통" : "낮음"}): ${guessed.length ? "출처 없이 추정한 항목은 " + guessed.join(", ") + "입니다. " : ""}예상 입장 방식: ${admission}. 방문 전 공식 안내를 확인하세요.`;
+  return { ev: { ...ev, eventStart: start, eventEnd: end, hours }, condition };
 }
 
 export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new Date(), tasteSignals: unknown = []): PlanResult {
@@ -273,9 +345,8 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
     return { ...plan, tasteScore, rankingScore: plan.score + tasteScore };
   };
   const forecasts = forecastQueues(input, [...evidence.values(), ...conditionalEvidence.values()], now);
-  function buildDays(eligible: Map<number, PlaceEvidence>, conditional: boolean): DayPlan[] {
-    const routeConditions = conditional ? conditions : new Map<number, string>();
-    const candidates = routes([...eligible.keys()]).filter(route => !conditional || route.some(index => conditions.has(index)));
+  function buildDays(eligible: Map<number, PlaceEvidence>, conditional: boolean, routeConditions = conditional ? conditions : new Map<number, string>(), aiFilled = new Set<number>()): DayPlan[] {
+    const candidates = routes([...eligible.keys()]).filter(route => !conditional || route.some(index => routeConditions.has(index)));
     const days: DayPlan[] = [];
     for (let stamp = Date.parse(input.dateFrom); stamp <= Date.parse(input.dateTo); stamp += DAY) {
       const date = new Date(stamp).toISOString().slice(0, 10);
@@ -288,7 +359,7 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
       for (const start of starts) {
         if (start >= minutes(input.timeTo)) continue;
         for (const route of candidates) {
-          const scheduled = schedule(input, eligible, forecasts, route, date, start, routeConditions);
+          const scheduled = schedule(input, eligible, forecasts, route, date, start, routeConditions, aiFilled);
           const plan = scheduled ? rank(scheduled) : null;
           if (plan && (!best || plan.rankingScore! > best.rankingScore! || (plan.rankingScore === best.rankingScore && plan.stops[0].arrival < best.stops[0].arrival))) best = plan;
         }
@@ -300,7 +371,16 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
   }
   const days = buildDays(evidence, false);
   const conditionalDays = conditionalEvidence.size ? buildDays(new Map([...evidence, ...conditionalEvidence]), true) : [];
-  const allDays = [...days, ...conditionalDays];
+  // When sources cannot settle a plan for every place, let the AI's rough prediction fill the gaps, labeled per stop.
+  const aiEvidence = new Map<number, PlaceEvidence>(), aiConditions = new Map<number, string>();
+  if (!days.length || !days[0].complete) {
+    for (const index of problems.keys()) {
+      const filled = aiFill(allEvidence.find((item) => item.index === index), input);
+      if (filled) { aiEvidence.set(index, filled.ev); aiConditions.set(index, filled.condition); }
+    }
+  }
+  const aiDays = aiEvidence.size ? buildDays(new Map([...evidence, ...aiEvidence]), true, aiConditions, new Set(aiEvidence.keys())) : [];
+  const allDays = [...days, ...conditionalDays, ...aiDays];
   const selected = new Set(days[0]?.stops.map((stop) => stop.index) ?? []);
   const excluded = input.places.flatMap((_, index) => {
     if (selected.has(index)) return [];
@@ -315,7 +395,10 @@ export function planVisits(raw: Input, allEvidence: PlaceEvidence[], now = new D
   if (allDays.some((day) => day.stops.some((stop) => !stop.waitKnown))) notes.push("대기 근거 미확인: 해당 날짜·도착 시각 ±60분 안의 관측이 없는 방문은 대기 30분을 임시 확보했습니다. 실제 대기를 보장하지 않습니다.");
   if (days.length && !days[0].complete) notes.push("모든 장소를 방문하는 일정이 성립하지 않아 가능한 일부 장소만 표시합니다. 제외 사유를 확인해 주세요.");
   if (days.some((day) => day.stops.some((stop) => stop.waitKind === "observed"))) notes.push("관측 대기는 같은 날짜의 가장 가까운 시각을 사용하고, 일정에는 관측 범위의 상한을 확보합니다. 이후 현장 상황은 달라질 수 있습니다.");
+  if (aiDays.length) notes.push("AI 예측 일정은 출처로 확인되지 않은 행사 기간·영업시간·입장 방식·혼잡을 AI가 대략 예측해서 채운 일정입니다. 정확하지 않을 수 있으니 방문 전 공식 안내를 꼭 확인하세요.");
+  if (allDays.some((day) => day.stops.some((stop) => stop.waitKind === "ai"))) notes.push("AI 예측 대기는 관측 후기가 없을 때 AI가 행사 인기·요일·시간대로 대략 예측한 값입니다. 관측값이 아닙니다.");
+  if (allDays.some((day) => day.stops.some((stop) => stop.crowdLevel)) && AVOID_CROWDS.test(input.preferences)) notes.push("붐비는 시간을 피하고 싶다는 조건을 반영해 AI가 한산하다고 예측한 시간대를 우선했습니다.");
   if (days.some((day) => day.stops.some((stop) => stop.waitKind === "forecast"))) notes.push("미래 대기는 동일 행사·최근 21일·같은 평일/주말 조건의 2일 이상·3개 이상 관측을 넓힌 통계적 추정입니다. 일정에는 추정 상한을 확보하지만 실제 대기를 보장하지 않습니다. 관측 사실과 구분해 확인해 주세요.");
-  if (!days.length) notes.push(conditionalDays.length ? "입장 조건까지 확인된 일정은 없습니다. 입장 방법 확인을 전제로 한 조건부 일정을 따로 표시합니다." : reservationCandidates.length ? "확정 일정 대신 예약 확인 후보를 표시합니다. 예약 완료나 입장 가능 여부를 확인한 결과는 아닙니다." : "확인된 근거와 방문 조건을 함께 만족하는 일정이 없습니다. 영업시간을 추정해서 채우지 않았습니다.");
-  return { days, conditionalDays, reservationCandidates, excluded, notes, taste };
+  if (!days.length) notes.push(aiDays.length && !conditionalDays.length ? "출처로 확인된 일정은 없습니다. 대신 AI가 대략 예측한 일정을 따로 표시합니다." : conditionalDays.length ? "입장 조건까지 확인된 일정은 없습니다. 입장 방법 확인을 전제로 한 조건부 일정을 따로 표시합니다." : reservationCandidates.length ? "확정 일정 대신 예약 확인 후보를 표시합니다. 예약 완료나 입장 가능 여부를 확인한 결과는 아닙니다." : "확인된 근거와 방문 조건을 함께 만족하는 일정이 없습니다. 영업시간을 추정해서 채우지 않았습니다.");
+  return { days, conditionalDays, aiDays, reservationCandidates, excluded, notes, taste };
 }

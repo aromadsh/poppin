@@ -411,3 +411,46 @@ test("예약 후보의 링크는 실제로 일치한 안전한 입장 근거만 
   ev.sources.push({ ...evidence().sources[0], url: "https://example.com/event", matched: true });
   assert.equal(planVisits(input(), [ev], now).reservationCandidates[0].sourceUrl, null);
 });
+
+function sakuraPrediction(): NonNullable<PlaceEvidence["prediction"]> {
+  const weekday = (hour: number) => hour === 10 ? { level: "low" as const, waitMin: 0, waitMax: 10 } : { level: "high" as const, waitMin: 20, waitMax: 40 };
+  return {
+    model: "gpt-6.1-sol", likelyStart: "2026-11-11", likelyEnd: "2026-11-29", hours: { open: "10:00", close: "20:00" }, admission: "reservation",
+    crowd: [10, 11, 12, 13, 14, 15, 16, 17, 18].flatMap(hour => [{ day: "weekday" as const, hour, ...weekday(hour) }, { day: "weekend" as const, hour, level: "very_high" as const, waitMin: 40, waitMax: 90 }]),
+    busyDates: [{ date: "2026-11-11", level: "very_high", reason: "오픈 첫날" }],
+    bestVisits: [{ date: "2026-11-12", time: "10:00", reason: "오픈 다음 평일 첫 시간" }],
+    rationale: "인기 IP 콜라보라 오픈 첫날과 주말이 붐빌 것으로 봅니다.", confidence: "low",
+  };
+}
+
+test("근거를 찾지 못한 행사도 AI 예측으로 대략적인 일정을 따로 만들고 붐비지 않는 시간을 고른다", () => {
+  const raw: Input = { places: [{ name: "카드캡터 사쿠라 콜라보 카페", genre: "캐릭터", address: "서울 성동구 서울숲2길 43", stayMinutes: 60 }], dateFrom: "2026-11-11", dateTo: "2026-11-18", timeFrom: "10:00", timeTo: "19:00", preferences: "분비는 시간은 피하고 싶어요." };
+  const ev: PlaceEvidence = { index: 0, matched: false, status: "not_found", eventStart: null, eventEnd: null, hours: [], admission: { reservation: "unknown", lastEntry: null, note: "미확인" }, lat: null, lng: null, value: "확인된 정보 없음", summary: "근거 부족", queue: [], sources: [], prediction: sakuraPrediction() };
+  const result = planVisits(raw, [ev], now);
+  assert.equal(result.days.length, 0);
+  assert.ok(result.aiDays.length > 0);
+  const best = result.aiDays[0];
+  assert.equal(best.aiPredicted, true);
+  assert.equal(best.date, "2026-11-12");
+  assert.deepEqual([best.stops[0].arrival, best.stops[0].waitKind, best.stops[0].crowdLevel, best.stops[0].aiPredicted], ["10:00", "ai", "low", true]);
+  assert.match(best.stops[0].condition!, /AI 예측\(gpt-6\.1-sol, 신뢰도 낮음\).*행사 기간.*사전 예약 필요/);
+  // The opening day and weekends rank below quiet weekdays.
+  const order = result.aiDays.map(day => day.date);
+  assert.ok(order.indexOf("2026-11-11") > order.indexOf("2026-11-13"));
+  assert.ok(order.indexOf("2026-11-14") > order.indexOf("2026-11-13"));
+  assert.ok(result.notes.some(note => note.includes("AI가 대략 예측")));
+});
+
+test("출처로 종료가 확인된 행사는 AI 예측으로도 되살리지 않고, 확정 일정이 있으면 AI 일정을 만들지 않는다", () => {
+  const past = evidence(0, { status: "past", eventEnd: "2026-10-20", prediction: { ...sakuraPrediction(), likelyStart: "2026-10-01", likelyEnd: "2026-11-30" } });
+  assert.deepEqual(planVisits(input(), [past], now).aiDays, []);
+  assert.deepEqual(planVisits(input(), [evidence(0, { prediction: sakuraPrediction() })], now).aiDays, []);
+});
+
+test("관측 대기가 없으면 확정 일정에서도 AI 예측 대기를 쓰고, 붐비는 시간을 피한다", () => {
+  const prediction = { ...sakuraPrediction(), crowd: [10, 11, 12, 13, 14, 15, 16, 17].map(hour => ({ day: "weekday" as const, hour, level: hour === 12 ? "low" as const : "high" as const, waitMin: hour === 12 ? 0 : 20, waitMax: hour === 12 ? 10 : 40 })), bestVisits: [], busyDates: [] };
+  const result = planVisits({ ...input(), preferences: "붐비는 시간은 피하고 싶어요" }, [evidence(0, { prediction })], now);
+  const stop = result.days[0].stops[0];
+  assert.deepEqual([stop.arrival, stop.waitKind, stop.waitMax, stop.crowdLevel, stop.aiPredicted], ["12:00", "ai", 10, "low", undefined]);
+  assert.equal(result.days[0].aiPredicted, undefined);
+});
